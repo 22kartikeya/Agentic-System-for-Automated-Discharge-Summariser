@@ -5,6 +5,7 @@ Agentic AI system for automated hospital discharge summaries (FA5 capstone).
 ## Documentation (SSoT)
 
 - [`Documentation/REQUIREMENTS_REFERENCE.md`](Documentation/REQUIREMENTS_REFERENCE.md) — single source of truth
+- [`Documentation/architecture.md`](Documentation/architecture.md) — finalized end-to-end architecture diagram
 - [`Documentation/coding_style/`](Documentation/coding_style/) — company coding patterns
 - Project layout section inside the requirements reference mirrors this repo
 

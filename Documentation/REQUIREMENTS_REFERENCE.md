@@ -35,6 +35,8 @@ Runtime code lives at **repo root**. `Documentation/` is specs/seeds/coding-styl
 
 **Also:** `configs/` (runtime YAML/JSON) · `shared/` (settings, llm, guardrails, tracing) · `templates/discharge_summary.html` · `data/input/` (MCP Root) · `data/reports/` · `data/vector_db/` · `data/rag_sessions/` · `run.py` launcher.
 
+**Workflow diagram (ASCII):** [`Documentation/architecture.md`](architecture.md) — finalized end-to-end architecture, release gate, and MCP topology.
+
 **Must not:** put Sampling callback on Extractor; put Watcher logic inside Monitor (MCP tool only); call Mock EHR from Validator except via Primary EHR Validation Tool; nest RAG under `agents/`.
 
 ---
