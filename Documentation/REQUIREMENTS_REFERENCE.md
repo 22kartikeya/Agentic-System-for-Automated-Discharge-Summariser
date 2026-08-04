@@ -6,13 +6,36 @@
 
 ## 0. How to Use This Document
 
-- **Sources of truth, in priority order:** (1) `FA5_SP_Interns_Capstone_AI_Discharge_Summaries.docx`, (2) `configs/rules.yaml`, (3) `mock_ehr/data.py`, (4) `Data/incoming/` sample packets, (5) user-provided screenshots (logged in §19), (6) company coding-style refs in `Documentation/coding_style/` (§10.2).
+- **Sources of truth, in priority order:** (1) `FA5_SP_Interns_Capstone_AI_Discharge_Summaries.docx`, (2) runtime `configs/rules.yaml` (seeded from `Documentation/configs/rules.yaml`), (3) `Documentation/mock_ehr/data.py`, (4) `Documentation/Data/incoming/` sample packets (synced to `data/input/`), (5) user-provided screenshots (logged in §19), (6) company coding-style refs in `Documentation/coding_style/` (§10.2).
 - **Everything in this document is MUST** unless explicitly marked `OPTIONAL`, `PREFERRED`, or `NOT SPECIFIED`. Implementation must follow it strictly — do not invent requirements, do not silently drop a documented detail.
 - **One concept, one place.** Each table/contract is defined exactly once and cross-referenced elsewhere (e.g. "see §3.6") instead of being repeated.
 - **Conflicts** between FA5 and `rules.yaml`/samples are never silently resolved — they are all consolidated in §16 with a stated stance.
 - **Company dependency pins** (§10.1) are **PREFERRED**, not FA5-mandatory — use them when possible; deviate only with a recorded reason.
 - **Coding style** (§10.2): before implementing any feature, verify alignment with `langgraph.txt`, `rag.txt`, and `MCP_A2A.txt`. If LangGraph patterns conflict with MCP/A2A design, **MCP/A2A wins**.
+- **Project layout** (§0.1) must stay in sync with the repo folders — rename code or update §0.1 in the same change.
 - This file is updated after every new screenshot/requirement clarification; §19 logs what has been reviewed.
+
+### 0.1 Project Layout (repo folders ↔ §2 services)
+
+Runtime code lives at **repo root**. `Documentation/` is specs/seeds/coding-style only.
+
+| SSoT §2 Component | Port | Folder |
+| --- | --- | --- |
+| Discharge Monitor Agent (Google ADK) | 8103 | `agents/monitor/` |
+| Clinical Extractor Agent (LangGraph) | 8100 | `agents/extractor/` |
+| Clinical Normalizer Agent (LangGraph) | 8102 | `agents/normalizer/` — owns `sampling_callback.py` |
+| Clinical Validation Agent (LangGraph) | 8101 | `agents/validator/` |
+| Discharge Summary Generator (Google ADK, streaming) | 8104 | `agents/summary/` |
+| Clinical RAG Q&A (5 Agno agents, streaming) | 8105 | `rag/` (top-level, not under `agents/`) |
+| Host Orchestrator (Google ADK + Gradio) | 8083 | `host/` |
+| Streamlit HITL Dashboard (5 pages) | 8501 | `dashboard/` (+ `elicitation_callback.py`) |
+| Primary MCP Clinical Tools | 8200 `/clinicaltools` | `mcp_servers/primary/` |
+| Secondary MCP Analytics | 8201 `/analyticstools` | `mcp_servers/secondary/` |
+| Mock EHR (FastAPI) | 8050 | `mock_ehr/` |
+
+**Also:** `configs/` (runtime YAML/JSON) · `shared/` (settings, llm, guardrails, tracing) · `templates/discharge_summary.html` · `data/input/` (MCP Root) · `data/reports/` · `data/vector_db/` · `data/rag_sessions/` · `run.py` launcher.
+
+**Must not:** put Sampling callback on Extractor; put Watcher logic inside Monitor (MCP tool only); call Mock EHR from Validator except via Primary EHR Validation Tool; nest RAG under `agents/`.
 
 ---
 

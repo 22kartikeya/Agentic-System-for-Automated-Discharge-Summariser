@@ -1,0 +1,11 @@
+[project]
+name = "agentic-system-for-automated-discharge-summariser"
+version = "0.1.0"
+description = "Agentic AI system for automated hospital discharge summaries (FA5 capstone)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+# Prefer company pins from Documentation/REQUIREMENTS_REFERENCE.md §10.1 when adding packages.
+# Example: uv add a2a-sdk==0.3.22 google-adk==1.25.0 agno==2.1.4 litellm==1.80.7 ...

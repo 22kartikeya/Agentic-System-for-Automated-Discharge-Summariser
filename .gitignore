@@ -7,3 +7,17 @@ __pycache__/
 .env
 .venv/
 venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/reports/*.log
+data/reports/*.json
+data/reports/*.html
+data/reports/*.pdf
+data/vector_db/*
+!data/vector_db/.gitkeep
+data/rag_sessions/*
+!data/rag_sessions/.gitkeep
+data/processed/*
+!data/processed/.gitkeep

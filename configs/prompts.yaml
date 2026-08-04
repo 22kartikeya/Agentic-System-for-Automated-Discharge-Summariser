@@ -1,0 +1,55 @@
+# =============================================================================
+# prompts.yaml — Seed bodies for Primary MCP Prompts (SSoT §3.4)
+# =============================================================================
+# Agents MUST fetch prompts via MCP get_prompt — never hardcode in agent code.
+# Prompt NAMES and PARAMETERS are immutable (FA5). Bodies below are scaffolds.
+
+prompts:
+  discharge-extraction-prompt:
+    parameters:
+      - language
+      - doc_types
+    used_by: Clinical Extractor Agent
+    # TODO: author full extraction instructions
+    template: |
+      Extract structured and unstructured clinical fields from the provided
+      documents. Language={{language}}. Document types={{doc_types}}.
+      Return structured JSON aligned with the project clinical schema.
+
+  ehr-cross-validation-prompt:
+    parameters:
+      - patient_id
+    used_by: Clinical Validation Agent
+    template: |
+      Cross-validate discharge data for patient_id={{patient_id}} against
+      Mock EHR medications, allergies, labs, and care plans. Flag mismatches
+      using the configured cross-validation rule IDs.
+
+  abbreviation-normalization-prompt:
+    parameters:
+      - source_language
+    used_by: Clinical Normalizer Agent
+    template: |
+      Normalize medical abbreviations and clinical phrasing from
+      source_language={{source_language}} into clear English clinical terms.
+      Include a translation confidence score between 0 and 1.
+
+  summary-generation-prompt:
+    parameters:
+      - risk_level
+      - audience
+    used_by: Discharge Summary Generator
+    template: |
+      Generate a patient-friendly discharge summary for audience={{audience}}
+      at risk_level={{risk_level}}. Stream sections in order:
+      patient → meds → labs → bill → instructions.
+
+  rag-answer-prompt:
+    parameters:
+      - context_length
+    used_by: Agno RAG Generation Agent
+    template: |
+      Answer using ONLY the retrieved patient-record context
+      (context_length={{context_length}}). If the answer is not in the records,
+      respond exactly:
+      I don't know — this information is not available in the patient records.
