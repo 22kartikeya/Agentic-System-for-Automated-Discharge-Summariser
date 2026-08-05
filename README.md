@@ -26,9 +26,10 @@ uv run python -m agents.monitor    # Discharge Monitor A2A service on :8103
 uv run python -m agents.extractor  # Clinical Extractor A2A service on :8100
 ```
 
-Extractor needs AWS Bedrock credentials in `.env` (see `.env.example`) to structure
-free-text/OCR sources; already-structured JSON intake files are mapped directly
-and need no LLM call.
+Extractor needs AWS Bedrock credentials in `.env` (see `.env.example`) for free-text /
+OCR sources. JSON intake files map directly (no LLM). PDFs use PyPDF2; set
+`TESSERACT_ENABLED=true` (and install `tesseract`) for image OCR when no `.ocr.txt`
+sidecar exists.
 
 Host/port for every service come from [`configs/agent_config.yaml`](configs/agent_config.yaml).
 
@@ -41,7 +42,7 @@ Built bottom-up, one phase at a time, per the phased roadmap. Each ✅ phase has
 | 1 | `shared/` config + logger, Mock EHR FastAPI `:8050` (seeded from `mock_ehr/seed.py`) | ✅ done |
 | 2 | Primary MCP skeleton `:8200/clinicaltools` — resources (`rules.yaml`) + prompts | ✅ done |
 | 3 | MCP Roots + Clinical Watcher tool + Discharge Monitor agent (`:8103`, A2A) | ✅ done |
-| 4 | Clinical Data Harvester tool + Extractor agent (`:8100`, LangGraph, A2A) | ✅ done |
+| 4 | Clinical Data Harvester + Extractor (`:8100`, LangGraph, A2A) — Tools + Resources + Prompts; PDF/optional OCR | ✅ done |
 | 5 | Medical Lang Bridge + Sampling + Normalizer agent | ⏳ stub |
 | 6–7 | Rules Engine / EHR Validation / Insight Reporter tools + Secondary MCP `:8201` | ⏳ stub |
 | 8 | Validator agent + release gate | ⏳ stub |
@@ -56,7 +57,7 @@ Built bottom-up, one phase at a time, per the phased roadmap. Each ✅ phase has
 | --- | --- |
 | `agents/` | Monitor (✅), Extractor (✅), Normalizer, Validator, Summary (A2A) |
 | `rag/` | Agno 5-agent RAG Q&A (:8105 streaming) |
-| `mcp_servers/` | Primary `:8200/clinicaltools` (resources/prompts/watcher/harvester ✅) + Secondary `:8201/analyticstools` |
+| `mcp_servers/` | Primary `:8200/clinicaltools` (resources/prompts/watcher/harvester ✅, PDF/OCR readers) + Secondary `:8201/analyticstools` |
 | `host/` | Google ADK + Gradio orchestrator (:8083) |
 | `dashboard/` | Streamlit HITL 5 pages (:8501) |
 | `mock_ehr/` | FastAPI Mock EHR (:8050) ✅ |
@@ -75,6 +76,7 @@ curl http://127.0.0.1:8050/patients/P1019
 uv run fastmcp dev mcp_servers/primary/server.py
 
 # Extractor LangGraph pipeline (needs Primary MCP up; Bedrock for .txt/OCR only)
+# Works for any patient_id under data/input/ (e.g. P1019, P1021, P1024)
 uv run python -c "
 import asyncio, json
 from agents.extractor.graph import run_extraction

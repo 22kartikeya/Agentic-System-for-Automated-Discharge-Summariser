@@ -1,16 +1,14 @@
 """Extraction result models (SSoT §5.2, §6.1 Table 3).
 
-These are the canonical shapes the Clinical Extractor Agent must produce,
-regardless of source language or file format (txt/json/ocr text).
+Canonical shapes the Clinical Extractor produces for ANY patient_id
+(no hard-coded sample patients).
 
-Field-naming note (conflict §16 row 1): FA5 Table 3 uses `doctors`,
-`adr_allergy_info`, `follow_up_appointments` (plural); `configs/rules.yaml`
-uses `attending_physician` + `consulting_doctors`, `allergies`,
-`follow_up_appointment` (singular). We store the rules.yaml names below
-(more granular) — `doctors` = attending_physician + consulting_doctors,
-`adr_allergy_info` = allergies, `follow_up_appointments` = follow_up_appointment.
-Both FA5 names and rules.yaml names are therefore represented, just not as
-duplicate fields.
+Conflict §16 row 1 — BOTH naming sets live on DischargeExtraction:
+  FA5 Table 3:        doctors, adr_allergy_info, follow_up_appointments
+  rules.yaml:         attending_physician, consulting_doctors, allergies,
+                      follow_up_appointment
+After extraction, call fill_fa5_and_rules_aliases() so both sides are filled
+when either side has data — Completeness can check either name.
 """
 
 from __future__ import annotations
@@ -53,7 +51,7 @@ class BillLineItem(BaseModel):
 
 
 class DischargeExtraction(BaseModel):
-    """Structured discharge report fields (FA5 Table 3 'Discharge Report')."""
+    """Structured discharge report — rules.yaml names + FA5 Table 3 aliases."""
 
     patient_id: str | None = None
     patient_name: str | None = None
@@ -64,6 +62,8 @@ class DischargeExtraction(BaseModel):
     discharge_date: str | None = None
     ward: str | None = None
     bed_no: str | None = None
+
+    # rules.yaml names (granular)
     attending_physician: str | None = None
     consulting_doctors: list[str] = Field(default_factory=list)
     discharge_diagnosis: list[str] = Field(default_factory=list)
@@ -73,6 +73,21 @@ class DischargeExtraction(BaseModel):
     discharge_instructions: str | None = None
     discharge_approved: bool | None = None
     discharge_approved_by: str | None = None
+
+    # FA5 Table 3 names (aliases — must stay on the schema, §16 row 1)
+    doctors: list[str] = Field(
+        default_factory=list,
+        description="FA5 alias for attending_physician + consulting_doctors",
+    )
+    adr_allergy_info: list[str] = Field(
+        default_factory=list,
+        description="FA5 alias for allergies",
+    )
+    follow_up_appointments: str | None = Field(
+        default=None,
+        description="FA5 alias for follow_up_appointment",
+    )
+
     language: str = Field(default="en", description="Source document language code")
 
 
@@ -102,8 +117,8 @@ class BillExtraction(BaseModel):
 class ExtractionResult(BaseModel):
     """Everything the Extractor produces for one patient case.
 
-    One of discharge/lab/bill may be None when that document type was not
-    found under data/input/ for this patient_id.
+    Works for any patient_id that has files under data/input/ — not limited
+    to the sample corpus (P1019–P1024).
     """
 
     patient_id: str
@@ -111,4 +126,41 @@ class ExtractionResult(BaseModel):
     lab: LabExtraction | None = None
     bill: BillExtraction | None = None
     source_files: dict[str, str] = Field(default_factory=dict)
+    # Which MCP Resources were read (uri -> short note / length)
+    resources_used: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
+
+
+def fill_fa5_and_rules_aliases(discharge: DischargeExtraction) -> DischargeExtraction:
+    """Fill missing FA5 aliases from rules.yaml fields, and the other way around.
+
+    Call this after every successful discharge extraction so both naming sets
+    are always present for Completeness / HITL later.
+    """
+    # rules.yaml → FA5
+    if not discharge.doctors:
+        doctors: list[str] = []
+        if discharge.attending_physician:
+            doctors.append(discharge.attending_physician)
+        doctors.extend(discharge.consulting_doctors or [])
+        discharge.doctors = doctors
+
+    if not discharge.adr_allergy_info and discharge.allergies:
+        discharge.adr_allergy_info = list(discharge.allergies)
+
+    if not discharge.follow_up_appointments and discharge.follow_up_appointment:
+        discharge.follow_up_appointments = discharge.follow_up_appointment
+
+    # FA5 → rules.yaml (if the LLM / source filled only FA5 names)
+    if not discharge.allergies and discharge.adr_allergy_info:
+        discharge.allergies = list(discharge.adr_allergy_info)
+
+    if not discharge.follow_up_appointment and discharge.follow_up_appointments:
+        discharge.follow_up_appointment = discharge.follow_up_appointments
+
+    if not discharge.attending_physician and not discharge.consulting_doctors and discharge.doctors:
+        # First name → attending; rest → consulting (simple, beginner-friendly)
+        discharge.attending_physician = discharge.doctors[0]
+        discharge.consulting_doctors = list(discharge.doctors[1:])
+
+    return discharge

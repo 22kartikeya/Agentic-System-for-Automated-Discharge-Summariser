@@ -2,16 +2,39 @@
 
 Clinical Watcher must only scan inside client-declared Roots.
 Use Path.relative_to() so anything outside the root is rejected.
+
+Also: sanitize_patient_id() so Harvester / file lookup reject ../ and
+path separators — same safety idea for tool args that are not Roots.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 
 # Subfolders under the MCP Root workspace (SSoT §12 / architecture)
 INTAKE_SUBFOLDERS = ("doctor_reports", "lab_reports", "bills")
+
+# Matches Watcher + FA5 examples (P001, P1019, P1024, …) — any digit length
+_PATIENT_ID_RE = re.compile(r"^P\d+$", re.IGNORECASE)
+
+
+def sanitize_patient_id(patient_id: str) -> str:
+    """Return a safe patient_id (e.g. P001 / P1019) or raise ValueError.
+
+    Rejects empty values, path separators, and '..' so callers cannot escape
+    an intake folder via patient_id. Not limited to the sample corpus.
+    """
+    pid = (patient_id or "").strip()
+    if not pid:
+        raise ValueError("patient_id is empty")
+    if "/" in pid or "\\" in pid or ".." in pid:
+        raise ValueError(f"invalid patient_id (path characters not allowed): {patient_id!r}")
+    if not _PATIENT_ID_RE.fullmatch(pid):
+        raise ValueError(f"invalid patient_id (expected P + digits, e.g. P001): {patient_id!r}")
+    return pid.upper()
 
 
 def file_uri_to_path(uri: str) -> Path:

@@ -2,11 +2,13 @@
 
 Tool only — no Sampling, no Elicitation. Given a patient_id and a document
 type, finds the file under data/input/ and returns readable text (+ parsed
-JSON when the source is already structured). It does NOT try to map
-foreign-language JSON keys into clinical fields — that semantic mapping is
-the Clinical Extractor Agent's job (it uses the LLM so it can handle any
-source language or key naming). The Harvester's only job is "get me the
-text/tables out of this file".
+JSON when the source is already structured).
+
+Multi-modal (beginner-friendly):
+  1. Prefer .ocr.txt / .json / .txt when present (find_patient_file)
+  2. PDF → PyPDF2 text extract
+  3. PNG/JPG → optional Tesseract (TESSERACT_ENABLED=true)
+Works for any new patient files — not hard-coded to the sample corpus.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import json
 
 from fastmcp import FastMCP
 
+from mcp_servers.primary.document_readers import read_binary_document
+from mcp_servers.primary.roots import sanitize_patient_id
 from mcp_servers.primary.rules_loader import find_patient_file, read_text_file
 from shared.logger import get_logger
 from shared.settings import get_path
@@ -40,13 +44,24 @@ async def _harvest_one(patient_id: str, doc_type: str) -> dict:
             "error": f"unknown doc_type '{doc_type}', expected one of {list(_DOC_TYPE_PATH_KEYS)}",
         }
 
-    folder = get_path(_DOC_TYPE_PATH_KEYS[doc_type])
-    path = find_patient_file(folder, patient_id)
-    if path is None:
+    try:
+        safe_id = sanitize_patient_id(patient_id)
+    except ValueError as exc:
         return {
             "patient_id": patient_id,
             "doc_type": doc_type,
-            "error": f"no {doc_type} file found for {patient_id} under {folder}",
+            "error": str(exc),
+            "raw_text": "",
+            "structured_data": None,
+        }
+
+    folder = get_path(_DOC_TYPE_PATH_KEYS[doc_type])
+    path = find_patient_file(folder, safe_id)
+    if path is None:
+        return {
+            "patient_id": safe_id,
+            "doc_type": doc_type,
+            "error": f"no {doc_type} file found for {safe_id} under {folder}",
             "raw_text": "",
             "structured_data": None,
         }
@@ -55,11 +70,12 @@ async def _harvest_one(patient_id: str, doc_type: str) -> dict:
     is_binary = suffix in _BINARY_SUFFIXES and not path.name.endswith(".ocr.txt")
 
     result = {
-        "patient_id": patient_id,
+        "patient_id": safe_id,
         "doc_type": doc_type,
         "source_file": path.name,
         "format": suffix.lstrip("."),
         "ocr_used": False,
+        "pdf_used": False,
         "structured_data": None,
     }
 
@@ -73,21 +89,17 @@ async def _harvest_one(patient_id: str, doc_type: str) -> dict:
             result["error"] = f"invalid JSON: {exc}"
             return result
         result["structured_data"] = data
-        # Prefer an embedded raw_text field (some samples include one for
-        # OCR-style completeness); otherwise dump the JSON as text so the
-        # Extractor's LLM step always has something readable to work from.
+        # Prefer an embedded raw_text field when present; else dump JSON as text
         result["raw_text"] = data.get("raw_text") or json.dumps(data, ensure_ascii=False, indent=2)
         return result
 
     if is_binary:
-        # No OCR sidecar present. Tesseract OCR is optional (SSoT §10) and
-        # disabled by default (TESSERACT_ENABLED=false) — surface a clear
-        # notice instead of silently returning nothing.
-        result["raw_text"] = (
-            f"[binary file: {path.name} — no .ocr.txt sidecar found and OCR is disabled. "
-            "Enable TESSERACT_ENABLED and add OCR to harvest this file.]"
-        )
-        result["error"] = "binary_without_ocr"
+        text, meta = read_binary_document(path)
+        result["raw_text"] = text
+        result["ocr_used"] = bool(meta.get("ocr_used"))
+        result["pdf_used"] = bool(meta.get("pdf_used"))
+        if meta.get("error"):
+            result["error"] = meta["error"]
         return result
 
     # .txt / .ocr.txt sidecar — plain readable text
@@ -104,7 +116,9 @@ def register_harvester_tools(mcp: FastMCP) -> None:
         title="Clinical Data Harvester Tool",
         description=(
             "Extract text/tables from a patient's discharge report, lab report, "
-            "or bill under data/input/. doc_type must be 'discharge', 'lab', or 'bill'."
+            "or bill under data/input/. Supports txt/json/ocr sidecars, PDF text "
+            "(PyPDF2), and optional Tesseract OCR for images. "
+            "doc_type must be 'discharge', 'lab', or 'bill'."
         ),
         annotations={
             "readOnlyHint": True,
@@ -117,10 +131,12 @@ def register_harvester_tools(mcp: FastMCP) -> None:
         """Harvest one document for one patient. Returns a JSON string."""
         result = await _harvest_one(patient_id, doc_type)
         logger.info(
-            "Harvested %s/%s -> %s (error=%s)",
+            "Harvested %s/%s -> %s (error=%s, pdf=%s, ocr=%s)",
             patient_id,
             doc_type,
             result.get("source_file"),
             result.get("error"),
+            result.get("pdf_used"),
+            result.get("ocr_used"),
         )
         return json.dumps(result, ensure_ascii=False, indent=2)

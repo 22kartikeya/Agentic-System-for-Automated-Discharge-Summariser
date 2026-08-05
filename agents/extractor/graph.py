@@ -34,6 +34,7 @@ async def run_extraction(patient_id: str, doc_types: list[str] | None = None) ->
         "patient_id": patient_id,
         "doc_types": doc_types or list(_DEFAULT_DOC_TYPES),
         "harvested": {},
+        "resources": {},
         "extraction": None,
         "errors": [],
     }

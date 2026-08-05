@@ -7,6 +7,7 @@ from pathlib import Path
 import aiofiles
 import yaml
 
+from mcp_servers.primary.roots import assert_inside_root, sanitize_patient_id
 from shared.settings import get_path
 
 
@@ -27,43 +28,72 @@ def load_prompts_config() -> dict:
 
 def find_patient_file(folder: Path, patient_id: str) -> Path | None:
     """
-    Find the best readable file for a patient under doctor_reports/ or lab_reports/.
+    Find the best readable file for a patient under an intake folder.
 
-    Preference order (simple, beginner-friendly):
-    1. Prefer .ocr.txt sidecar when a binary exists
-    2. Else prefer .txt / .json
-    3. Else first matching file
+    Preference order (simple, beginner-friendly, any new patient):
+    1. .ocr.txt sidecar (best for scanned PNG/PDF)
+    2. .json companion (common for bills)
+    3. .txt
+    4. .pdf (Harvester can extract text with PyPDF2)
+    5. images (.png/.jpg) — Harvester may OCR if enabled
+    6. otherwise first matching file
+
+    patient_id is sanitized; every match must stay inside folder
+    (Path.relative_to guard — same idea as SSoT §3.8 Roots).
     """
+    safe_id = sanitize_patient_id(patient_id)
+    folder = folder.resolve()
     if not folder.exists():
         return None
 
-    matches = sorted(folder.glob(f"{patient_id}*"))
+    matches = sorted(folder.glob(f"{safe_id}*"))
     if not matches:
         return None
 
+    # Keep only paths that are still under folder (blocks ../ tricks)
+    safe_matches = []
     for path in matches:
-        if path.name.endswith(".ocr.txt"):
-            return path
+        try:
+            safe_matches.append(assert_inside_root(path, folder))
+        except ValueError:
+            continue
+    if not safe_matches:
+        return None
 
-    for path in matches:
-        if path.suffix.lower() in {".txt", ".json"}:
-            return path
+    def _pick(*predicates):
+        for pred in predicates:
+            for path in safe_matches:
+                if pred(path):
+                    return path
+        return None
 
-    return matches[0]
+    chosen = _pick(
+        lambda p: p.name.endswith(".ocr.txt"),
+        lambda p: p.suffix.lower() == ".json",
+        lambda p: p.suffix.lower() == ".txt",
+        lambda p: p.suffix.lower() == ".pdf",
+        lambda p: p.suffix.lower() in {".png", ".jpg", ".jpeg"},
+    )
+    return chosen or safe_matches[0]
 
 
 async def read_text_file(path: Path) -> str:
     """Read a text-ish file with aiofiles (coding-style pattern).
 
-    For PDF/PNG without an OCR sidecar, return a short notice — full OCR
-    belongs to the Harvester tool in a later phase.
+    For PDF/PNG binaries, try multi-modal extractors (PDF text / optional OCR)
+    so MCP Resources and Harvester stay consistent for new patient files.
     """
     suffix = path.suffix.lower()
     if suffix in {".pdf", ".png", ".jpg", ".jpeg"} and not path.name.endswith(".ocr.txt"):
-        return (
-            f"[binary file: {path.name} — use the .ocr.txt sidecar when available; "
-            "full OCR lands in Harvester phase]"
-        )
+        from mcp_servers.primary.document_readers import read_binary_document
+
+        text, meta = read_binary_document(path)
+        if meta.get("error") and not text.strip():
+            return (
+                f"[binary file: {path.name} — no text extracted "
+                f"({meta.get('error')}); prefer a .ocr.txt or .json companion]"
+            )
+        return text
 
     async with aiofiles.open(path, mode="r", encoding="utf-8", errors="replace") as f:
         return await f.read()

@@ -42,11 +42,13 @@ from shared.settings import get_service, load_agent_config
 
 logger = get_logger("extractor_a2a")
 
-_PATIENT_ID_RE = re.compile(r"\bP\d{4,}\b", re.IGNORECASE)
+# Any digit length — FA5 examples use P001; sample corpus uses P1019.
+# Same idea as Watcher / sanitize_patient_id (not locked to 4 digits).
+_PATIENT_ID_RE = re.compile(r"\bP\d+\b", re.IGNORECASE)
 
 
 def _extract_patient_id(query: str) -> str | None:
-    """Pull a patient_id like P1019 out of the free-text A2A request."""
+    """Pull a patient_id like P001 or P1019 out of the free-text A2A request."""
     match = _PATIENT_ID_RE.search(query or "")
     return match.group(0).upper() if match else None
 
@@ -67,7 +69,7 @@ class ExtractorAgentExecutor(AgentExecutor):
         patient_id = _extract_patient_id(query)
 
         if not patient_id:
-            message = "Could not find a patient_id (e.g. P1019) in the request."
+            message = "Could not find a patient_id (e.g. P001 or P1019) in the request."
             await updater.add_artifact([Part(root=TextPart(text=message))], name="extraction_error")
             await updater.complete()
             return
@@ -129,6 +131,7 @@ def build_agent_card(host: str, port: int) -> AgentCard:
         ),
         tags=["extractor", "harvester", "llm", "structured-extraction"],
         examples=[
+            "Extract clinical data for P001",
             "Extract clinical data for P1019",
             "Structure the discharge, lab, and bill for patient P1021",
         ],

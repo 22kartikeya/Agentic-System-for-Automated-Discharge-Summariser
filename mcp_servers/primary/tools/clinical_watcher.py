@@ -24,7 +24,10 @@ logger = get_logger("clinical_watcher")
 
 
 def _patient_id_from_name(filename: str) -> str | None:
-    """Extract patient id prefix like P1019 from P1019_thomas_wright.txt."""
+    """Extract patient id prefix like P001 / P1019 from P1019_thomas_wright.txt.
+
+    Any digit length is accepted so new patients (P001, P50, P1025, …) work.
+    """
     stem = filename.split(".")[0]  # drop extensions / .ocr.txt style later
     # Handle P1019_labs / P1019_bill / P1019_name_name
     if "_" in stem:
@@ -32,7 +35,7 @@ def _patient_id_from_name(filename: str) -> str | None:
     else:
         prefix = stem
     if prefix.startswith("P") and prefix[1:].isdigit():
-        return prefix
+        return prefix.upper()
     return None
 
 

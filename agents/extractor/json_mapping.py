@@ -8,9 +8,8 @@ no value and Nova Lite sometimes returns empty {} rows for nested lists
 so JSON sources skip the LLM entirely here; the LLM path in nodes.py is used
 only for genuinely unstructured text (txt / OCR sidecars).
 
-Key names vary across samples (English vs Hindi vs a few schema variants),
-so lookups try several known aliases before falling back to positional
-mapping for foreign-language-keyed row dicts (e.g. Hindi lab_results).
+Key lookups try common aliases (English + FA5 Table 3 names). Works for any
+patient JSON under data/input/ — not hard-coded to sample IDs.
 """
 
 from __future__ import annotations
@@ -24,9 +23,8 @@ from shared.models.extraction import (
     LabExtraction,
     LabTestResult,
     PrescriptionItem,
+    fill_fa5_and_rules_aliases,
 )
-
-_LAB_ROW_KEYS = ("test_name", "result", "units", "reference_range", "flag")
 
 
 def _first(data: dict, *keys: str, default: Any = None) -> Any:
@@ -88,7 +86,19 @@ def map_discharge_json(data: dict) -> DischargeExtraction:
             )
         )
 
-    return DischargeExtraction(
+    # Accept either rules.yaml names or FA5 Table 3 names from the source JSON
+    allergies = [
+        str(a) for a in _as_list(_first(data, "allergies", "adr_allergy_info", default=[]))
+    ]
+    follow_up = _first(data, "follow_up_appointment", "follow_up_appointments")
+    doctors_raw = _as_list(data.get("doctors"))
+    attending = _first(data, "attending_physician")
+    consulting = [str(d) for d in _as_list(data.get("consulting_doctors"))]
+    if not attending and not consulting and doctors_raw:
+        attending = str(doctors_raw[0])
+        consulting = [str(d) for d in doctors_raw[1:]]
+
+    discharge = DischargeExtraction(
         patient_id=_first(data, "patient_id"),
         patient_name=_first(data, "patient_name"),
         age=_to_int(_first(data, "age")),
@@ -98,41 +108,46 @@ def map_discharge_json(data: dict) -> DischargeExtraction:
         discharge_date=_first(data, "discharge_date"),
         ward=_first(data, "ward"),
         bed_no=_to_str(_first(data, "bed_no")),
-        attending_physician=_first(data, "attending_physician"),
-        consulting_doctors=[str(d) for d in _as_list(data.get("consulting_doctors"))],
+        attending_physician=attending,
+        consulting_doctors=consulting,
         discharge_diagnosis=[str(d) for d in _as_list(data.get("discharge_diagnosis"))],
         medications=medications,
-        allergies=[str(a) for a in _as_list(data.get("allergies"))],
-        follow_up_appointment=_first(data, "follow_up_appointment"),
+        allergies=allergies,
+        follow_up_appointment=follow_up,
         discharge_instructions=_first(data, "discharge_instructions"),
         discharge_approved=_to_bool(_first(data, "discharge_approved", "discharge_ok")),
         discharge_approved_by=_first(data, "discharge_approved_by"),
         language=_first(data, "language", default="en"),
     )
+    return fill_fa5_and_rules_aliases(discharge)
 
 
-def _map_lab_test_row(item: dict) -> LabTestResult:
-    if _first(item, "test_name", "test") is not None:
-        return LabTestResult(
-            test_name=_first(item, "test_name", "test"),
-            result=_to_str(_first(item, "result")),
-            units=_first(item, "units", "unit"),
-            reference_range=_first(item, "reference_range", "ref_range"),
-            flag=_first(item, "flag", "indicator"),
-        )
-    # Foreign-language column names (e.g. Hindi) — the sample corpus keeps a
-    # fixed column order, so fall back to positional mapping.
-    values = list(item.values())
-    padded = (values + [None] * len(_LAB_ROW_KEYS))[: len(_LAB_ROW_KEYS)]
-    row = dict(zip(_LAB_ROW_KEYS, padded))
-    row["test_name"] = row["test_name"] or "unknown"
-    row["result"] = _to_str(row["result"])
-    return LabTestResult(**row)
+def _map_lab_test_row(item: dict) -> LabTestResult | None:
+    """Map one lab row when known English keys are present; else skip.
+
+    Foreign-language-only keys are left for the LLM path (nodes.py) rather
+    than guessing column order — keeps this mapper safe for any new patient JSON.
+    """
+    if _first(item, "test_name", "test") is None:
+        return None
+    return LabTestResult(
+        test_name=_first(item, "test_name", "test"),
+        result=_to_str(_first(item, "result")),
+        units=_first(item, "units", "unit"),
+        reference_range=_first(item, "reference_range", "ref_range"),
+        flag=_first(item, "flag", "indicator"),
+    )
 
 
 def map_lab_json(data: dict) -> LabExtraction:
     rows = data.get("lab_results") or data.get("tests") or []
-    tests = [_map_lab_test_row(item) for item in rows if isinstance(item, dict)]
+    tests = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        mapped = _map_lab_test_row(item)
+        if mapped is not None:
+            tests.append(mapped)
     return LabExtraction(
         patient_id=_first(data, "patient_id"),
         vendor_name=_first(data, "vendor_name", "performing_lab"),
