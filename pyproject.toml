@@ -4,7 +4,19 @@ version = "0.1.0"
 description = "Agentic AI system for automated hospital discharge summaries (FA5 capstone)"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "a2a-sdk==0.3.22",
+    "aiofiles==24.1.0",
+    "fastapi>=0.141.1",
+    "fastmcp==2.12.2",
+    "google-adk==1.25.0",
+    "httpx==0.28.1",
+    "mcp>=1.23.0,<2.0.0",
+    "pydantic>=2.13.4",
+    "pyyaml>=6.0.3",
+    "starlette>=0.49.1,<1.0.0",
+    "uvicorn==0.35.0",
+]
 
 [tool.uv]
 # Prefer company pins from Documentation/REQUIREMENTS_REFERENCE.md §10.1 when adding packages.

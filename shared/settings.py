@@ -1,6 +1,42 @@
-"""Load configs/* and environment variables.
+"""Load configs/agent_config.yaml so ports and paths are not hardcoded.
 
-Status: scaffold only — implement per Documentation/REQUIREMENTS_REFERENCE.md.
+Phase 1: enough for Mock EHR. Later phases can reuse the same helpers.
 """
 
-# TODO: implement
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+
+# Repo root = parent of the shared/ package
+REPO_ROOT = Path(__file__).resolve().parent.parent
+AGENT_CONFIG_PATH = REPO_ROOT / "configs" / "agent_config.yaml"
+
+# Cache so we do not re-read the YAML on every call
+_config: dict | None = None
+
+
+def load_agent_config() -> dict:
+    """Read and return agent_config.yaml as a plain dict."""
+    global _config
+    if _config is None:
+        with open(AGENT_CONFIG_PATH, encoding="utf-8") as f:
+            _config = yaml.safe_load(f)
+    return _config
+
+
+def get_service(name: str) -> dict:
+    """Return one service block, e.g. get_service('mock_ehr')."""
+    services = load_agent_config().get("services", {})
+    if name not in services:
+        raise KeyError(f"Unknown service in agent_config.yaml: {name}")
+    return services[name]
+
+
+def get_path(key: str) -> Path:
+    """Return an absolute path from the paths: section (relative to repo root)."""
+    paths = load_agent_config().get("paths", {})
+    if key not in paths:
+        raise KeyError(f"Unknown path key in agent_config.yaml: {key}")
+    return REPO_ROOT / paths[key]

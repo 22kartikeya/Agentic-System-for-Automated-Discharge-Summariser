@@ -2,11 +2,11 @@
 
 **Project:** Agentic AI System for Automated Discharge Summaries for Hospitals
 **Capstone:** FA5_SP_Interns_Capstone_AI_Discharge_Summaries
-**Last refactored:** 2026-08-04 · **Re-audited line-by-line against all sources:** 2026-08-05 (§16 row 11, §10.2 notes, §12 note added — no structural rewrite needed)
+**Last refactored:** 2026-08-04 · **Re-audited:** 2026-08-05 · **§12 expanded from `mock_ehr/seed.py` validation oracle:** 2026-08-05
 
 ## 0. How to Use This Document
 
-- **Sources of truth, in priority order:** (1) `FA5_SP_Interns_Capstone_AI_Discharge_Summaries.docx`, (2) runtime `configs/rules.yaml` (seeded from `Documentation/configs/rules.yaml`), (3) `Documentation/mock_ehr/data.py`, (4) `Documentation/Data/incoming/` sample packets (synced to `data/input/`), (5) user-provided screenshots (logged in §19), (6) company coding-style refs in `Documentation/coding_style/` (§10.2).
+- **Sources of truth, in priority order:** (1) `FA5_SP_Interns_Capstone_AI_Discharge_Summaries.docx`, (2) runtime `configs/rules.yaml` (seeded from `Documentation/configs/rules.yaml`), (3) runtime `mock_ehr/seed.py` (from `Documentation/mock_ehr/data.py` — validation test oracle, §12), (4) `Documentation/Data/incoming/` sample packets (synced to `data/input/`), (5) user-provided screenshots (logged in §19), (6) company coding-style refs in `Documentation/coding_style/` (§10.2).
 - **Everything in this document is MUST** unless explicitly marked `OPTIONAL`, `PREFERRED`, or `NOT SPECIFIED`. Implementation must follow it strictly — do not invent requirements, do not silently drop a documented detail.
 - **One concept, one place.** Each table/contract is defined exactly once and cross-referenced elsewhere (e.g. "see §3.6") instead of being repeated.
 - **Conflicts** between FA5 and `rules.yaml`/samples are never silently resolved — they are all consolidated in §16 with a stated stance.
@@ -257,7 +257,7 @@ Each entry below states only what is *specific* to that agent; shared MCP contra
 
 ### 5.9 Mock EHR System (FastAPI · 8050)
 - Domains: Patients, Meds, Allergies, Labs, Care Plans.
-- FA5 specifies 5 JSON data files; the provided seed is Python dicts in `mock_ehr/data.py` (plus a `GUIDELINES` dict that is not one of the five named files — see conflict §16 row 7).
+- FA5 specifies 5 JSON data files; the provided seed is Python dicts in `mock_ehr/seed.py` (plus a `GUIDELINES` dict that is not one of the five named files — see conflict §16 row 7). Inline comments in `seed.py` are the validation oracle — see §12.
 - Exact REST route schemas: **NOT SPECIFIED** — implementer must design.
 
 ---
@@ -461,6 +461,7 @@ Company / lab environment versions provided by the team. **Not FA5-mandated**, b
 - When the older lockfile (`agno==2.0.3`) and the `uv add` list (`agno==2.1.4`) disagree, **prefer the `uv add` pin (2.1.4)** unless lab images force 2.0.3.
 - FA5 still requires packages not listed above (e.g. **Streamlit**, **FAISS**, **LangFuse**, **sentence-transformers**, **FastAPI** for Mock EHR) — add those as needed; company list does not replace FA5 stack completeness.
 - Windows/lab cert packages (`pip-system-certs`, `python-certifi-win32`) are environment helpers, not architecture components.
+- **Phase 3 pin deviation (recorded):** `google-adk==1.25.0` (FA5 MUST framework) requires `mcp>=1.23.0` and `starlette>=0.49.1`. Company pins `mcp==1.14.0` and `starlette==0.47.3` are therefore **relaxed** for ADK compatibility (`mcp>=1.23.0,<2.0.0`, `starlette>=0.49.1,<1.0.0`). `fastmcp==2.12.2` still accepts this mcp range. Prefer company pins again only if a future ADK release re-aligns.
 
 ### 10.2 Coding Style & Development Guidelines — MUST FOLLOW
 
@@ -550,26 +551,55 @@ Ports/frameworks/roles for each box are defined once in §2 — this section onl
 
 **Documented paths (FA5):** input example `data/input/P001/`, `P002/`; Roots example `file:///data/input`; FAISS `data/vector_db/`; reports `data/reports` (+ `pipeline.log`).
 
-**Actual provided corpus:** `Documentation/Data/incoming/{doctor_reports,lab_reports,bills}/`, covering patients **P1019–P1024** only.
+**Actual provided corpus:** `Documentation/Data/incoming/{doctor_reports,lab_reports,bills}/` (synced to `data/input/`), covering patients **P1019–P1024** only.
 - Naming: doctor `P{id}_{firstname}_{lastname}.{ext}`; labs `P{id}_labs.{ext}`; bills `P{id}_bill.{ext}`; OCR sidecar `{binary}.{ext}.ocr.txt` (often present for doctor/lab binaries; bill binaries often lack OCR and use JSON companions instead).
 - Path/ID conflict with FA5 examples — see conflict §16 row 4; prefer aligning MCP Roots to the actual incoming folder unless told otherwise.
 
-**Expected sample outcomes** (test oracle from `mock_ehr/data.py` comments):
+**Runtime Mock EHR seed:** [`mock_ehr/seed.py`](../mock_ehr/seed.py) (promoted from `Documentation/mock_ehr/data.py`). Dicts: `PATIENTS`, `ALLERGIES`, `MED_ORDERS`, `LABS`, `CARE_PLANS`, plus unused-by-routes `GUIDELINES`. Comments in that file are the **validation test oracle** — preserve planted mismatches; do not "fix" them when implementing Rules Engine / EHR Validation / risk scoring.
 
-| Patient | Profile | Expected Outcome |
-| --- | --- | --- |
-| P1019 | EN text; fully reconciled; paid; complete | Low risk, **auto-approve**, no HITL |
-| P1020 | ES PDF; reconciled; paid; **only address missing** (soft, weight 1) | Low risk, **auto-approve**, no HITL |
-| P1021 | HI JSON; clinically OK; **UNPAID** + missing address + missing follow-up + low translation confidence | **HITL** (financial + data-entry) |
-| P1022 | NL PNG; Penicillin allergy vs **Amoxicilline**; missing age/doctor details; low NL confidence | **HARD HITL** — allergy + High tier |
-| P1023 | EN handwritten PNG; fully reconciled; paid; labs normal | Low risk, **auto-approve**, no HITL |
-| P1024 | NL TXT; Penicillin vs Amoxicilline; missing age/doctor details; low NL confidence | **HARD HITL** — allergy + High tier |
+### 12.1 Expected outcomes — patients with sample files (P1019–P1024)
 
-**Planted data-quality traps to preserve, not "fix":**
-- P1024 labs: CRP 38 is marked NORMAAL in the source despite a reference range <5 — this is an intentional data-quality trap; the EHR records it as `abnormal: False` (resolving pneumonia), which must be honored.
-- Allergy matching must handle spelling variants (Amoxicillin / Amoxicilline).
-- P1001–P1018 exist in the Mock EHR seed with intended mismatches but have **no incoming sample files** in the provided corpus — see conflict §16 row 10.
-- `mock_ehr/data.py` also defines a `GUIDELINES` dict (ICD-10 → `required_followup`, `essential_meds`) not referenced by any FA5 table or `rules.yaml` rule. It is supplementary test-oracle context (guideline-adherence flavor), not required by any Table 4 rule — the actual `follow_up_missing_check` logic runs off `CARE_PLANS.followup_required/speciality/window_days`, not `GUIDELINES`. Safe to ignore unless extending validation beyond FA5 scope.
+| Patient | Profile | Seed / intake drivers | Expected Outcome |
+| --- | --- | --- | --- |
+| P1019 | EN text; fully reconciled; paid; complete | Meds match; allergies empty; abnormal labs have `action_in_ehr`; care plan Endocrinology 30d (documented in discharge) | Low risk, **auto-approve**, no HITL |
+| P1020 | ES PDF; reconciled; paid | **Only address missing** (soft weight 1); Spanish med spellings in EHR (`Metformina`/`Atorvastatina`/`Aspirina`) must canonicalize to match discharge | Low risk, **auto-approve**, no HITL |
+| P1021 | HI JSON; clinically OK | Bill **UNPAID**; **address + follow-up missing** in discharge (care plan still requires Endocrinology 30d → `followup_missing`); Penicillin on file but discharge does **not** prescribe conflicting med; low Hindi translation confidence | **HITL** (financial + data-entry + translation) |
+| P1022 | NL PNG | **HARD allergy:** Penicillin on file vs discharge **Amoxicilline** (canonicalize Amoxicilline→Amoxicillin); missing age + doctor details; low NL confidence; follow-up **is** documented (no followup_missing); CRP/Leukocytes `abnormal: False` | **HARD HITL** — allergy + High tier |
+| P1023 | EN handwritten PNG | Fully reconciled; paid; labs normal (`abnormal: False`) | Low risk, **auto-approve**, no HITL |
+| P1024 | NL TXT | Same allergy pattern as P1022 (Penicillin vs Amoxicilline); missing age + attending/consulting; low NL confidence; follow-up documented; CRP 38 in **source** marked NORMAAL but ref `<5` — EHR has `abnormal: False` (must honor EHR, not "fix" from ref range) | **HARD HITL** — allergy + High tier |
+
+### 12.2 Seed-only intended mismatches (P1001–P1018 — no incoming files yet)
+
+These live in `mock_ehr/seed.py` for future cases / unit tests of the EHR Validation Tool. **No sample packets** in `data/input/` today (§16 row 10). When building validation, implement the checks so these oracles would pass if files were added.
+
+| Patient | Intended validation driver(s) from seed comments |
+| --- | --- |
+| P1003 | Discharge **adds Warfarin** not in EHR → `medication_added` + `high_risk_med_missing_in_ehr` (**HARD HITL**) |
+| P1004 | Penicillin (+ Latex) on file; discharge Amoxicillin-Clavulanate → **allergy contradiction HARD HITL**; inpatient was Levofloxacin switched to Amox-Clav |
+| P1007 | EHR has **Lisinopril** but discharge omits it → `medication_omission`; BNP 845 `abnormal: True` with **empty** `action_in_ehr` → `abnormal_lab_unresolved` |
+| P1013 | Clinically clean; bill **UNPAID** → financial HITL only |
+| P1014 | EHR has Loperamide + Hyoscine; discharge omits both → `medication_omission` ×2 (Medium HITL) |
+| P1015 | Meds reconcile; **low translation confidence** (Hindi) is the HITL driver |
+| P1016 | Penicillin on file; German discharge **Amoxicillin** → allergy HARD HITL; meds otherwise reconcile; low DE translation confidence |
+| P1017 | EHR has Nitrofurantoin; discharge omits it → `medication_omission`; low FR translation confidence |
+| P1011 / P1012 / P1018 | Clean / auto-approve-oriented seed profiles (no planted contradiction) |
+| P1001–P1002, P1005–P1006, P1008–P1010 | Baseline EHR rows with labs/care plans; use for general reconciliation tests |
+
+### 12.3 Validation implementation notes taken from seed (MUST honor)
+
+1. **Allergy matching is canonical, not string-equal.** Treat Amoxicillin / Amoxicilline / Amoxicillin-Clavulanate as conflicting with documented **Penicillin** allergy (P1004, P1016, P1022, P1024).
+2. **Med reconciliation is canonical.** Spanish EHR spellings (P1020: Metformina, Atorvastatina, Aspirina) and NL/EN pairs (Amoxicilline→Amoxicillin, Paracetamol→acetaminophen) must match after normalization — otherwise false `medication_omission` / `medication_added`.
+3. **Lab unresolved check uses EHR `abnormal` + `action_in_ehr`, not raw source ref ranges.** If `abnormal: True` and `action_in_ehr` is empty → `abnormal_lab_unresolved` (e.g. P1007 BNP). If `abnormal: False`, do **not** flag even if the intake PDF/TXT looks odd (P1022/P1024 CRP trap).
+4. **`follow_up_missing_check` uses `CARE_PLANS`**, not `GUIDELINES`. Compare discharge follow-up text against `followup_required` / `speciality` / `window_days`. P1021 care plan requires Endocrinology but discharge omits follow-up → missing. P1022/P1024 document follow-up → no followup_missing from care plan.
+5. **`GUIDELINES`** (ICD → required_followup / essential_meds) is supplementary only — not wired to FA5 Table 4. Do not build Table 4 logic on `GUIDELINES` unless explicitly extending scope.
+6. **Bills are not in the Mock EHR seed.** Payment status comes from intake bill documents. Unpaid bill HITL (P1021, and seed-note P1013) is `bill_settlement_check` / `bill_unpaid_with_discharge_ok` against extracted bill data, not an EHR field.
+7. **High-risk med added only on discharge** (P1003 Warfarin): fire `high_risk_med_missing_in_ehr` (weight 9, hard HITL) — EHR has no Warfarin order.
+8. Do **not** silently correct planted traps when harvesting/extracting; validation must surface them.
+
+**Planted data-quality traps (summary):**
+- P1024 labs source: CRP 38 marked NORMAAL vs ref `<5`; EHR `abnormal: False` wins.
+- Allergy spelling variants (Amoxicillin / Amoxicilline).
+- P1001–P1018: seed mismatches with no corpus files yet.
 
 ---
 
@@ -625,7 +655,7 @@ Every FA5-vs-`rules.yaml`/sample discrepancy found so far, consolidated here. No
 | 4 | Input path layout | Diagram: `data/input/P001/` | Actual corpus: `Documentation/Data/incoming/`, patients P1019–P1024 | §12 |
 | 5 | Faithfulness/groundedness threshold | RAI Table 12: faithfulness < 0.7 | `rules.yaml`: `rag_groundedness_min: 0.75` | §8, §6.4 |
 | 6 | Report format | FA5 requires PDF | `rules.yaml` `formats: [json, html]` only | §5.5, §6.5 |
-| 7 | Mock EHR data shape | FA5: 5 JSON data files | `mock_ehr/data.py`: Python dicts + extra `GUIDELINES` dict; REST schemas not specified | §5.9 |
+| 7 | Mock EHR data shape | FA5: 5 JSON data files | `mock_ehr/seed.py`: Python dicts + extra `GUIDELINES` dict; REST schemas implementer-designed (Phase 1 routes) | §5.9, §12 |
 | 8 | Missing config bodies | `prompts.yaml` / `agent_config.yaml` named in stack | Neither file's contents provided | §10 |
 | 9 | A2A Push Notifications | Required in stack/cover | Behavior **NOT SPECIFIED** | §4 |
 | 10 | P1001–P1018 scope | Exist in Mock EHR seed with intended mismatches | No incoming sample files provided for them | §12 |
@@ -664,6 +694,7 @@ Every FA5-vs-`rules.yaml`/sample discrepancy found so far, consolidated here. No
 - Bill source binaries often lack an `.ocr.txt` sidecar; prefer the JSON companion file when present.
 - `follow_up_missing_check` MUST be coded as an absolute block (like the other 3 Critical Table 4 rules), even though `rules.yaml` only gives it a 2-point score weight — do not trust the weight alone (§16 row 12).
 - Elicitation is exactly **one** batched `ctx.elicit()` call per case covering all non-blocking gaps — never one call per field; decline/cancel on that one call forces Mandatory HITL, it never gets averaged away by a low risk score.
+- Before implementing EHR Validation / Rules Engine: re-read **§12.1–§12.3** (`mock_ehr/seed.py` oracle) — allergy/med canonicalization, `abnormal`+`action_in_ehr` for labs, `CARE_PLANS` for follow-up, bills from intake not EHR.
 
 ---
 

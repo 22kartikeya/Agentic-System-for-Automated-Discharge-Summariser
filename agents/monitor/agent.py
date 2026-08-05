@@ -1,6 +1,126 @@
-"""ADK agent — register MCP Root; call Clinical Watcher (no raw paths).
+"""Discharge Monitor Agent — Google ADK (SSoT §5.1, §3.8).
 
-Status: scaffold only — implement per Documentation/REQUIREMENTS_REFERENCE.md.
+Framework: Google ADK.
+Job: register MCP Root for data/input/, call Clinical Watcher tool.
+Watcher logic lives on Primary MCP — this agent must NOT scan the filesystem itself.
 """
 
-# TODO: implement
+from __future__ import annotations
+
+import json
+import os
+
+from fastmcp import Client
+from google.adk.agents import LlmAgent
+from google.adk.tools import FunctionTool
+from mcp.types import Root
+
+from mcp_servers.primary.roots import path_to_file_uri
+from shared.logger import get_logger
+from shared.settings import get_path, get_service, load_agent_config
+
+logger = get_logger("monitor")
+
+
+def _primary_mcp_url() -> str:
+    """Build Primary MCP streamable-HTTP URL from agent_config.yaml."""
+    svc = get_service("primary_mcp")
+    host = svc.get("host", "127.0.0.1")
+    port = int(svc.get("port", 8200))
+    path = svc.get("transport_path", "/clinicaltools")
+    return f"http://{host}:{port}{path}"
+
+
+def get_clinical_root() -> Root:
+    """Build the MCP Root the Monitor must register (SSoT §3.8).
+
+    FA5 example shape: file:///data/input
+    Runtime: absolute file:// URI for configs paths.input_root.
+    """
+    input_root = get_path("input_root")
+    input_root.mkdir(parents=True, exist_ok=True)
+    uri = path_to_file_uri(input_root)
+    return Root(uri=uri, name="clinical_input")
+
+
+async def discover_clinical_intake() -> str:
+    """Call Clinical Watcher via MCP with Roots registered — no raw paths.
+
+    This is the Monitor's only way to learn about intake files.
+    """
+    root = get_clinical_root()
+    url = _primary_mcp_url()
+    logger.info("Monitor opening MCP with Root %s → %s", root.uri, url)
+
+    async with Client(url, roots=[root]) as client:
+        # No path arguments — Watcher uses ctx.list_roots() only
+        result = await client.call_tool("clinical_watcher", {})
+
+    # FastMCP returns a CallToolResult-like object; normalize to text
+    text = _tool_result_to_text(result)
+    logger.info("Watcher returned %s char(s)", len(text))
+    return text
+
+
+def _tool_result_to_text(result: object) -> str:
+    """Pull readable text out of a FastMCP / MCP tool result."""
+    # Newer clients: result.content is a list of blocks
+    content = getattr(result, "content", None)
+    if content:
+        parts = []
+        for block in content:
+            text = getattr(block, "text", None)
+            if text is not None:
+                parts.append(text)
+            elif isinstance(block, dict) and "text" in block:
+                parts.append(str(block["text"]))
+        if parts:
+            return "\n".join(parts)
+
+    data = getattr(result, "data", None)
+    if data is not None:
+        if isinstance(data, str):
+            return data
+        return json.dumps(data, indent=2)
+
+    # Fallback
+    return str(result)
+
+
+# ---------------------------------------------------------------------------
+# Google ADK agent (framework identity — SSoT §2 row 1)
+# ---------------------------------------------------------------------------
+# Phase 3 A2A executor calls discover_clinical_intake() directly so we can
+# test Roots/Watcher without an LLM API key. Host can later run this LlmAgent
+# with a real model when keys are configured.
+
+discover_tool = FunctionTool(discover_clinical_intake)
+
+monitor_agent = LlmAgent(
+    name="discharge_monitor",
+    model=os.environ.get("MONITOR_MODEL", "gemini-2.0-flash"),
+    description=(
+        "Discharge Monitor Agent. Discovers new hospital discharge documents "
+        "via MCP Roots and the Clinical Watcher tool."
+    ),
+    instruction=(
+        "You monitor the clinical intake folder. "
+        "When asked to scan, discover, or list new discharge cases, "
+        "call discover_clinical_intake. "
+        "Never invent file paths. Never ask for raw filesystem paths. "
+        "Return the Watcher JSON result to the caller."
+    ),
+    tools=[discover_tool],
+)
+
+
+def build_monitor_agent() -> LlmAgent:
+    """Return the Google ADK Monitor agent instance."""
+    return monitor_agent
+
+
+def get_a2a_auth_token() -> str:
+    """Shared secret for X-Agent-Auth-Token (SSoT §4)."""
+    cfg = load_agent_config()
+    env_name = cfg.get("a2a", {}).get("auth_token_env", "AGENT_AUTH_TOKEN")
+    return os.environ.get(env_name, "change-me-local-dev-token")

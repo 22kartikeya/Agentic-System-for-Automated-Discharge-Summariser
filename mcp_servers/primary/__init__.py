@@ -1,1 +1,1 @@
-"""Primary Clinical Tools MCP — :8200 /clinicaltools."""
+"""Primary MCP package — Clinical Tools Server (:8200 /clinicaltools)."""
