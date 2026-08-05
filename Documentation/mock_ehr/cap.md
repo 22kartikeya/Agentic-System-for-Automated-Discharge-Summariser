@@ -211,9 +211,9 @@ Source: FA5 §2.2, Tables 1–2.
 
 ### FR-03 Language normalization & translation (LangGraph + MCP Sampling)
 
-Clinical Normalizer translates Hindi/Spanish/German → English (samples also use Dutch; `rules.yaml` lists en/es/hi/de/fr/nl). Normalizes abbreviations (e.g., BID, PO). Must include **translation confidence score**.  
-**MCP Sampling (mandatory):** Medical Lang Bridge issues `ctx.session.create_message()` with ModelPreferences (`nova-lite` multilingual, `command-r-plus` English); LangGraph `sampling_callback` routes via LiteLLM.  
-Source: FA5 §2.3; languages also in `rules.yaml`.
+Clinical Normalizer focuses on **primary languages** from seed + `rules.yaml`: en/es/hi/de/fr/nl → English. Unexpected languages use a **fallback** multilingual Sampling path (still translate; never reject). Normalizes abbreviations (e.g., BID, PO). Must include **translation confidence score**.  
+**MCP Sampling (mandatory):** Medical Lang Bridge issues `ctx.session.create_message()` with ModelPreferences (`nova-lite` multilingual / fallback, `command-r-plus` English); LangGraph `sampling_callback` routes via LiteLLM.  
+Source: FA5 §2.3; helpers in `shared/language.py`.
 
 ### FR-04 Completeness validation
 

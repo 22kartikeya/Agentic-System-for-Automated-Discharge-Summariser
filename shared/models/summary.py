@@ -1,4 +1,4 @@
-"""Discharge summary response model.
+"""Discharge summary model.
 
 Status: scaffold only — implement per Documentation/REQUIREMENTS_REFERENCE.md.
 """

@@ -1,0 +1,220 @@
+"""Deterministic clinical normalization helpers (SSoT §5.3, §6.2, §12.3).
+
+Beginner picture — run these AFTER Sampling (or as a safety net):
+  1. Expand abbreviations from rules.yaml (string fields only).
+  2. Canonicalize medicine spellings (Metformina → Metformin, …).
+  3. Attach ICD-10 codes from rules.yaml when a diagnosis matches.
+
+These do NOT call an LLM. Sampling still does the translation work.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+import yaml
+
+from shared.settings import get_path
+
+# Local / EHR spelling variants → English/generic form used for matching (§12.3).
+# Keys are lowercase. Values keep a stable display casing.
+MED_NAME_ALIASES: dict[str, str] = {
+    "metformina": "Metformin",
+    "atorvastatina": "Atorvastatin",
+    "aspirina": "Aspirin",
+    "amoxicilline": "Amoxicillin",
+    "amoxicillin clavulanate": "Amoxicillin-Clavulanate",
+    "amoxicillin-clavulanate": "Amoxicillin-Clavulanate",
+    "paracetamol": "Acetaminophen",
+    "acetaminophen": "Acetaminophen",
+    "acetylsalicylic acid": "Aspirin",
+    "asa": "Aspirin",
+}
+
+# Field names that usually hold a medicine name
+_MED_NAME_KEYS = {
+    "name",
+    "medication",
+    "medication_name",
+    "drug",
+    "drug_name",
+    "medicine",
+    "med_name",
+}
+
+# Field names that usually hold a diagnosis string
+_DIAGNOSIS_KEYS = {
+    "diagnosis",
+    "primary_diagnosis",
+    "secondary_diagnosis",
+    "diagnoses",
+    "dx",
+    "condition",
+}
+
+
+def load_normalization_standards() -> dict:
+    """Read normalization_standards from configs/rules.yaml."""
+    path = get_path("rules_yaml")
+    with open(path, encoding="utf-8") as f:
+        rules = yaml.safe_load(f) or {}
+    return rules.get("normalization_standards", {}) or {}
+
+
+def abbreviation_map_from_yaml_text(abbrev_yaml: str) -> dict[str, str]:
+    """Parse the medical-abbreviations resource (YAML) into a dict."""
+    if not (abbrev_yaml or "").strip():
+        return {}
+    try:
+        data = yaml.safe_load(abbrev_yaml)
+    except yaml.YAMLError:
+        data = None
+    if isinstance(data, dict):
+        return {str(k): str(v) for k, v in data.items() if k and v}
+    # Fallback: line "KEY: value" parsing
+    mapping: dict[str, str] = {}
+    for line in abbrev_yaml.splitlines():
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip().strip('"').strip("'")
+        val = val.strip().strip('"').strip("'")
+        if key and val:
+            mapping[key] = val
+    return mapping
+
+
+def expand_abbreviations_in_text(text: str, mapping: dict[str, str]) -> str:
+    """Word-boundary expand abbreviations in one string."""
+    if not text or not mapping:
+        return text
+    out = text
+    for abbr in sorted(mapping.keys(), key=len, reverse=True):
+        pattern = re.compile(rf"\b{re.escape(abbr)}\b")
+        out = pattern.sub(mapping[abbr], out)
+    return out
+
+
+def _walk_strings(value: Any, transform) -> Any:
+    """Apply transform(str) to every string in a nested dict/list tree."""
+    if isinstance(value, str):
+        return transform(value)
+    if isinstance(value, list):
+        return [_walk_strings(item, transform) for item in value]
+    if isinstance(value, dict):
+        return {k: _walk_strings(v, transform) for k, v in value.items()}
+    return value
+
+
+def expand_abbreviations_in_extraction(
+    extraction: dict,
+    mapping: dict[str, str],
+) -> dict:
+    """Expand abbreviations on string fields only (does not break JSON keys)."""
+    if not mapping:
+        return extraction
+    return _walk_strings(
+        extraction,
+        lambda s: expand_abbreviations_in_text(s, mapping),
+    )
+
+
+def canonicalize_med_name(name: str) -> str:
+    """Map one medicine spelling to the project canonical English form."""
+    if not name or not str(name).strip():
+        return name
+    raw = str(name).strip()
+    key = re.sub(r"\s+", " ", raw.lower())
+    if key in MED_NAME_ALIASES:
+        return MED_NAME_ALIASES[key]
+    # Soft match: leading token (e.g. "Amoxicilline 500 mg")
+    first = key.split(" ", 1)[0]
+    if first in MED_NAME_ALIASES:
+        rest = raw[len(first) :].lstrip()
+        canon = MED_NAME_ALIASES[first]
+        return f"{canon} {rest}".strip() if rest else canon
+    return raw
+
+
+def canonicalize_meds_in_extraction(extraction: dict) -> dict:
+    """Walk extraction and canonicalize medicine name fields (§12.3)."""
+
+    def fix_obj(obj: Any) -> Any:
+        if isinstance(obj, list):
+            return [fix_obj(item) for item in obj]
+        if not isinstance(obj, dict):
+            return obj
+        out: dict[str, Any] = {}
+        for key, val in obj.items():
+            if key.lower() in _MED_NAME_KEYS and isinstance(val, str):
+                out[key] = canonicalize_med_name(val)
+            else:
+                out[key] = fix_obj(val)
+        return out
+
+    return fix_obj(extraction)
+
+
+def apply_icd10_map(extraction: dict, icd10_map: dict[str, str] | None = None) -> dict:
+    """Attach ICD-10 codes when diagnosis text matches rules.yaml map (§6.2)."""
+    if icd10_map is None:
+        standards = load_normalization_standards()
+        icd10_map = standards.get("icd10_map") or {}
+    if not icd10_map:
+        return extraction
+
+    # Lowercase lookup for soft match
+    lookup = {str(k).strip().lower(): str(v) for k, v in icd10_map.items()}
+
+    def code_for(diagnosis: str) -> str | None:
+        text = str(diagnosis).strip()
+        if not text:
+            return None
+        direct = lookup.get(text.lower())
+        if direct:
+            return direct
+        for name, code in lookup.items():
+            if name in text.lower() or text.lower() in name:
+                return code
+        return None
+
+    def fix_obj(obj: Any) -> Any:
+        if isinstance(obj, list):
+            return [fix_obj(item) for item in obj]
+        if not isinstance(obj, dict):
+            return obj
+        out: dict[str, Any] = {}
+        for key, val in obj.items():
+            out[key] = fix_obj(val)
+            if key.lower() in _DIAGNOSIS_KEYS and isinstance(val, str):
+                code = code_for(val)
+                if code and not out.get("icd10") and not out.get("icd_code"):
+                    out["icd10"] = code
+            elif key.lower() in _DIAGNOSIS_KEYS and isinstance(val, list):
+                # List of diagnosis strings → parallel icd10 list when useful
+                codes = []
+                for item in val:
+                    if isinstance(item, str):
+                        codes.append(code_for(item) or "")
+                if any(codes) and "icd10_list" not in out:
+                    out["icd10_list"] = codes
+        return out
+
+    return fix_obj(extraction)
+
+
+def post_normalize_extraction(
+    extraction: dict,
+    abbreviations_yaml: str = "",
+) -> dict:
+    """Full deterministic pass: abbrev → meds → ICD-10 (beginner one-call)."""
+    mapping = abbreviation_map_from_yaml_text(abbreviations_yaml)
+    if not mapping:
+        mapping = load_normalization_standards().get("abbreviation_map") or {}
+        mapping = {str(k): str(v) for k, v in mapping.items()}
+
+    result = expand_abbreviations_in_extraction(extraction, mapping)
+    result = canonicalize_meds_in_extraction(result)
+    result = apply_icd10_map(result)
+    return result

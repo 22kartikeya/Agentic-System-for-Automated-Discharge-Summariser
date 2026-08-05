@@ -1,8 +1,10 @@
 """Primary Clinical Tools MCP Server — port 8200, path /clinicaltools.
 
-Phase 2 added Resources + Prompts. Phase 3 added the Clinical Watcher tool
-(Tools + Roots). Phase 4 added the Clinical Data Harvester tool (Tools).
-Sampling / Elicitation / remaining Tools land in later phases.
+Phase 2: Resources + Prompts.
+Phase 3: Clinical Watcher (Tools + Roots).
+Phase 4: Clinical Data Harvester (Tools).
+Phase 5: Medical Lang Bridge (Tools + Sampling).
+Elicitation / remaining Tools land in later phases.
 
 Run from repo root:
     uv run python -m mcp_servers.primary
@@ -16,6 +18,7 @@ from mcp_servers.primary.prompts import register_prompts
 from mcp_servers.primary.resources import register_resources
 from mcp_servers.primary.tools.clinical_data_harvester import register_harvester_tools
 from mcp_servers.primary.tools.clinical_watcher import register_watcher_tools
+from mcp_servers.primary.tools.medical_lang_bridge import register_lang_bridge_tools
 from shared.logger import get_logger
 from shared.settings import get_service
 
@@ -27,6 +30,7 @@ register_resources(mcp)
 register_prompts(mcp)
 register_watcher_tools(mcp)
 register_harvester_tools(mcp)
+register_lang_bridge_tools(mcp)
 
 
 def main() -> None:

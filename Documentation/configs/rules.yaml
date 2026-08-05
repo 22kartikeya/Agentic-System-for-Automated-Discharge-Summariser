@@ -70,6 +70,7 @@ normalization_standards:
     QID: "four times daily"
     QD: "once daily"
     QHS: "at bedtime"
+    PO: "by mouth"
 
   icd10_map:
     "Type 2 Diabetes Mellitus": "E11.9"

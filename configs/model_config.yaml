@@ -12,10 +12,10 @@ llm:
     hint: nova-lite
     role: multilingual_and_primary
   fallback:
-    provider: cohere
-    # Sampling ModelPreferences hint: command-r-plus
-    model: command-r-plus
-    litellm_model: cohere/command-r-plus
+    provider: bedrock
+    # Sampling ModelPreferences hint: command-r-plus (via Bedrock when AWS keys set)
+    model: cohere.command-r-plus-v1:0
+    litellm_model: bedrock/cohere.command-r-plus-v1:0
     hint: command-r-plus
     role: english_fallback
 

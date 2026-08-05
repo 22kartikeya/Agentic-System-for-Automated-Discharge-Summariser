@@ -119,6 +119,8 @@ HOSPITAL
               (Primary MCP + SAMPLING)
                            │
               Detect language
+              Primary path: en/es/hi/de/fr/nl (seed + rules)
+              Fallback path: unexpected lang → still translate
               Translate → English
               Expand abbreviations
               Emit confidence score

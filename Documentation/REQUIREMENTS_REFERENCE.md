@@ -207,7 +207,8 @@ Each entry below states only what is *specific* to that agent; shared MCP contra
 - Uses Primary MCP Resources + Prompts; its prompt is `discharge-extraction-prompt` (see §3.4).
 
 ### 5.3 Clinical Normalizer Agent (LangGraph · 8102 · non-streaming)
-- Translates Hindi / Spanish / German → English (rules.yaml + samples also cover French / Dutch).
+- **Primary languages** (same set as `mock_ehr/seed.py` comments + `rules.yaml` `language_codes_supported`): **en, es, hi, de, fr, nl**. These are the focus path (high-confidence translation expected).
+- **Fallback:** if a new / unexpected language appears, still translate → English via multilingual Sampling (`nova-lite`). Do **not** reject the case; record a note and use lower confidence when unsure. Helpers live in `shared/language.py` (`PRIMARY_LANGUAGE_CODES`, `language_path`).
 - Normalizes medical abbreviations (e.g. BID = twice daily, PO = by mouth; full map §6.2).
 - Output **MUST include a translation confidence score**.
 - Uses prompt `abbreviation-normalization-prompt` (see §3.4).

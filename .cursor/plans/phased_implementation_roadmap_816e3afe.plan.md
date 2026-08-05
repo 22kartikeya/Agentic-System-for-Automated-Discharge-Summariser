@@ -14,8 +14,11 @@ todos:
   - id: phase-4-harvester-extractor
     content: "Phase 4: Clinical Data Harvester tool + Extractor agent :8100 (completed)"
     status: completed
-  - id: phase-5-plus-pipeline
-    content: "Phases 5–12 (later): Normalizer → validation tools → Validator gate → Summary → RAG → HITL → Host"
+  - id: phase-5-lang-bridge-normalizer
+    content: "Phase 5: Medical Lang Bridge + Sampling + Normalizer :8102 (completed)"
+    status: completed
+  - id: phase-6-plus-pipeline
+    content: "Phases 6–12 (later): validation tools → Validator gate → Summary → RAG → HITL → Host"
     status: pending
 isProject: false
 ---
@@ -92,7 +95,7 @@ flowchart LR
 | **2** | Primary MCP server skeleton `:8200` | Resources + empty tool shell; agents need a live MCP | List/read resources (`rules.yaml` URIs) |
 | **3** | Clinical Watcher + Roots + Monitor `:8103` | First real intake slice; matches architecture step 1 | Drop/list files under `data/input/` via Roots |
 | **4** | Harvester + Extractor `:8100` | Turns files into structured JSON (start with TXT/JSON patients) | Run Extractor on P1019 / P1021 |
-| **5** | Lang Bridge + Sampling + Normalizer `:8102` | Translation + confidence; needs LiteLLM | Run Normalizer on ES/HI/NL sample |
+| **5** | Lang Bridge + Sampling + Normalizer `:8102` | Primary langs en/es/hi/de/fr/nl + fallback; confidence; LiteLLM | Run Normalizer on ES/HI/NL (+ optional unexpected lang) |
 | **6** | Rules Engine + EHR Validation Tool + Reporter | Completeness + Table 4 + audit artifact | Call tools with hand-built JSON |
 | **7** | Secondary MCP risk `:8201` | Third parallel check | `calculate_risk_score` for a known finding set |
 | **8** | Validator + release gate `:8101` | Three checks together → report → gate (architecture §3–4) | Assert P1019 auto / P1022 hard HITL |

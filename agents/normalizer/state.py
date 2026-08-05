@@ -1,6 +1,17 @@
-"""Normalizer graph state (TypedDict).
+"""Normalizer graph state (TypedDict) — SSoT §5.3."""
 
-Status: scaffold only — implement per Documentation/REQUIREMENTS_REFERENCE.md.
-"""
+from __future__ import annotations
 
-# TODO: implement
+from typing import TypedDict
+
+
+class NormalizerState(TypedDict):
+    patient_id: str
+    # ExtractionResult as a plain dict (from Extractor or A2A caller)
+    extraction: dict
+    source_language: str
+    prompt_text: str
+    abbreviations_yaml: str
+    bridge_raw: str  # JSON string from medical_lang_bridge
+    result: dict | None  # NormalizationResult as dict
+    errors: list[str]
