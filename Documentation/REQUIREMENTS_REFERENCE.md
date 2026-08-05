@@ -2,7 +2,7 @@
 
 **Project:** Agentic AI System for Automated Discharge Summaries for Hospitals
 **Capstone:** FA5_SP_Interns_Capstone_AI_Discharge_Summaries
-**Last refactored:** 2026-08-04
+**Last refactored:** 2026-08-04 · **Re-audited line-by-line against all sources:** 2026-08-05 (§16 row 11, §10.2 notes, §12 note added — no structural rewrite needed)
 
 ## 0. How to Use This Document
 
@@ -158,11 +158,12 @@ All five agents above MUST fetch their prompt via MCP (`get_prompt`) — none ma
 
 ### 3.7 Elicitation Contract (Clinical Rules Engine ↔ HITL) — verbatim, MUST follow exactly
 
-- When the **Rules Engine Tool** detects **non-blocking** missing fields, it calls `ctx.elicit()` with a **Pydantic-based schema** describing the missing fields and their types.
-- The tool handles all three outcomes: **accept** (use reviewer input, continue), **decline** (mark unresolved, flag for HITL), **cancel** (abort and escalate).
-- The HITL **Streamlit** dashboard implements the `elicitation_callback` — renders a dynamic form to the reviewer and returns `ElicitResult`.
+- When the **Rules Engine Tool** detects **non-blocking** missing fields, it calls `ctx.elicit()` **once** with a single **Pydantic-based schema** describing *all* the missing fields (and their types) for that case — FA5 describes one schema covering the set of gaps, not one elicitation per field.
+- The tool handles all three outcomes of that one call: **accept** (use reviewer input for all supplied fields, continue validation normally), **decline** (mark the gaps unresolved, flag the case for HITL), **cancel** (abort the elicitation attempt and escalate).
+- Both **decline** and **cancel** guarantee the case cannot auto-approve — it is routed to Mandatory HITL at the Release Gate (§6.3, §8) exactly like a blocking-field or Critical cross-validation failure; they are not merely extra risk-score weight.
+- The HITL **Streamlit** dashboard implements the `elicitation_callback` — renders one dynamic form (all gaps at once) to the reviewer and returns a single `ElicitResult`.
 
-**MUST NOT:** elicit on *blocking* fields (blocking fields stop auto-summary and go straight to HITL — elicitation is for non-blocking gaps only).
+**MUST NOT:** elicit on *blocking* fields (blocking fields stop auto-summary and go straight to HITL — elicitation is for non-blocking gaps only); issue a separate `ctx.elicit()` call per missing field; let a decline/cancel outcome be silently outweighed by an otherwise-low risk score.
 
 ### 3.8 Roots Contract (Discharge Monitor ↔ Clinical Watcher) — MUST follow exactly
 
@@ -213,13 +214,16 @@ Each entry below states only what is *specific* to that agent; shared MCP contra
 - **MCP Sampling is mandatory** — see §3.6 for the exact contract.
 
 ### 5.4 Clinical Validation Agent (LangGraph · 8101 · non-streaming)
-- **Completeness validation**: checks discharge/lab/bill/prescription documents against the mandatory-field schema (§6.1, Table 3). Any **blocking** field missing → auto-summary generation is blocked and HITL must intervene.
-- **Cross-validation vs. Mock EHR / care plan / labs**: the 7 rules in §6.1 (Table 4) — Warning severity → Flag for review, Critical severity → Block discharge.
-- Non-blocking completeness gaps trigger **MCP Elicitation** — see §3.7 for the exact contract.
+- **Completeness validation**: checks discharge/lab/bill/prescription documents against the mandatory-field schema (§6.1, Table 3). Any **blocking** field missing → auto-summary generation is blocked and HITL must intervene, immediately, with **no elicitation attempt** for that field.
+- **Cross-validation vs. Mock EHR / care plan / labs**: the 7 rules in §6.1 (Table 4), split into two enforcement styles:
+  - **Critical → absolute block** (ignores risk score entirely): `allergy_contradiction_check`, `discharge_approval_check`, `bill_settlement_check`, and `follow_up_missing_check` (the last one is under-weighted in `rules.yaml` — see conflict §16 row 12 — implementation MUST still treat it as an absolute block per FA5).
+  - **Warning → score-only** (does not by itself force HITL): `med_omission_check`, `diagnosis_mismatch_check`, `lab_follow_up_mismatch_check` — each only contributes its `rules.yaml` weight (§6.3) to the aggregate risk score; the resulting tier (Low/Medium/High) is what actually decides auto-approve vs. standard/mandatory HITL.
+- Non-blocking completeness gaps trigger **MCP Elicitation** — see §3.7 for the exact contract. All non-blocking gaps for a case are batched into **one** `ctx.elicit()` call (one Pydantic schema, one `ElicitResult`) — not one round-trip per missing field.
+- Completeness, EHR cross-validation, and risk scoring may run **together in one Validation Agent step** (the preferred architecture diagram shows all three side-by-side). They must not be short-circuited early — the Reporter (§5.5) always gets a complete picture.
 - Rules are fetched at runtime via MCP Resources `resource://clinical-rules/completeness` and `resource://clinical-rules/cross-validation` (§3.3) — never hardcoded.
 
 ### 5.5 Audit & Risk Reporter (Clinical Insight Reporter Tool)
-- Generates a clinician/admin-friendly discharge audit report.
+- Generates a clinician/admin-friendly discharge audit report. Runs **unconditionally** after completeness + cross-validation + risk scoring, regardless of whether the case ended up blocked/escalated — the Release Gate (§5.4, §6.3, §8) reads this report rather than re-deriving anything.
 - Output formats: **JSON** (system) + **HTML/PDF** (clinician-friendly) — see conflict §16 row 6 re: `rules.yaml` formats.
 - Report MUST include: (1) missing fields, (2) EHR discrepancies, (3) medication conflicts, (4) translation confidence, (5) risk level (Low/Medium/High), (6) recommendation (Approve/Edit/Reject — FA5 wording; see conflict §16 row 2), (7) audit trail with LangFuse trace IDs, (8) bill amount and payment status.
 - Every report stamps **SHA-256 of `rules.yaml`** as `rules_version` (compliance reproducibility; see §6).
@@ -296,6 +300,8 @@ Each entry below states only what is *specific* to that agent; shared MCP contra
 - `allergy_must_not_match_prescription: true`
 - `high_risk_meds_need_counseling`: Warfarin, Insulin, Methotrexate, Digoxin, Heparin
 - Always HITL regardless of score: pediatric, obstetric, oncology service lines
+
+> **Critical vs. Warning enforcement (§5.4):** `allergy_contradiction_check`, `discharge_approval_check`, `bill_settlement_check` are absolute blocks backed by a `rules.yaml` hard guardrail/business rule. `follow_up_missing_check` is also Critical/Block per FA5, but `rules.yaml` only weights it 2 points (`risk_scoring_matrix.weights.followup_missing`) — **conflict §16 row 12**, resolved in favor of FA5 (absolute block). The 3 Warning rules are pure score contributors with no override.
 
 ### 6.2 Normalization Standards
 
@@ -514,6 +520,12 @@ These files are the **company coding SSoT** for style, structure, naming, and pa
 - Replacing Streamlit HITL or Gradio Host with another UI stack.
 - Copying demo ports/paths from the coding_style snippets (`8007`, `mcpserver`, movie/stock examples) — those are style only; **this project's ports/paths are §2 / §12**.
 
+#### Notes confirmed during the 2026-08-05 line-by-line re-audit
+
+- **A2A server wrapper depends on `a2a-sdk` major version.** `MCP_A2A.txt` shows two patterns: `A2AStarletteApplication` (for `a2a-sdk<1.0.0`) vs. route-factory functions `create_agent_card_routes`/`create_jsonrpc_routes`/`create_rest_routes` (mandatory once the wrapper classes were removed in `a2a-sdk>=1.0.0`). The **company pin is `a2a-sdk==0.3.22`** (§10.1) — use the **`A2AStarletteApplication` + `DefaultRequestHandler` + `AgentExecutor`** pattern, not the v1.0+ route-factory style.
+- **Push Notifications now have a concrete pattern to mirror** (resolves part of conflict §16 row 9 — FA5 never specifies *behavior*, but the company reference shows *how*): `MCP_A2A.txt` demonstrates `BasePushNotificationSender` + `InMemoryPushNotificationConfigStore` wired into `DefaultRequestHandler`. Use this scaffold; the actual trigger condition/payload for this project is still an implementer decision (not specified by FA5).
+- **No company reference exists for the RAG Triad / Reflection Agent.** Neither `rag.txt` nor `MCP_A2A.txt` shows a faithfulness/relevance scoring pattern — the Reflection Agent (§5.6, Agno agent 5) must be designed from scratch as an LLM-as-judge, consistent in spirit with `HallucinationChecker` (§8). This is the one place in the RAG/MCP/A2A pipeline with zero style precedent to copy.
+
 ---
 
 ## 11. System Architecture
@@ -557,6 +569,7 @@ Ports/frameworks/roles for each box are defined once in §2 — this section onl
 - P1024 labs: CRP 38 is marked NORMAAL in the source despite a reference range <5 — this is an intentional data-quality trap; the EHR records it as `abnormal: False` (resolving pneumonia), which must be honored.
 - Allergy matching must handle spelling variants (Amoxicillin / Amoxicilline).
 - P1001–P1018 exist in the Mock EHR seed with intended mismatches but have **no incoming sample files** in the provided corpus — see conflict §16 row 10.
+- `mock_ehr/data.py` also defines a `GUIDELINES` dict (ICD-10 → `required_followup`, `essential_meds`) not referenced by any FA5 table or `rules.yaml` rule. It is supplementary test-oracle context (guideline-adherence flavor), not required by any Table 4 rule — the actual `follow_up_missing_check` logic runs off `CARE_PLANS.followup_required/speciality/window_days`, not `GUIDELINES`. Safe to ignore unless extending validation beyond FA5 scope.
 
 ---
 
@@ -616,6 +629,8 @@ Every FA5-vs-`rules.yaml`/sample discrepancy found so far, consolidated here. No
 | 8 | Missing config bodies | `prompts.yaml` / `agent_config.yaml` named in stack | Neither file's contents provided | §10 |
 | 9 | A2A Push Notifications | Required in stack/cover | Behavior **NOT SPECIFIED** | §4 |
 | 10 | P1001–P1018 scope | Exist in Mock EHR seed with intended mismatches | No incoming sample files provided for them | §12 |
+| 11 | Secondary MCP tool count | Table 7 ("Agent Tools") lists only **2** Secondary tools (Risk Score, Population Benchmarks) | Table 8 / Table 15 list **3** (adds `generate_risk_heatmap`) | §3.5 — SSoT already lists all 3; this row just records that the FA5 doc is internally inconsistent between its own tables |
+| 12 | `follow_up_missing_check` enforcement | Table 4: **Critical → Block discharge** (absolute, like `allergy_contradiction_check`) | `rules.yaml` only has `risk_scoring_matrix.weights.followup_missing: 2` — a soft score contributor, **not** a hard block or guardrail | §5.4, §6.1, §6.3 — **resolved: FA5 wins** (source-priority order, §0). Implementation MUST treat a failed `follow_up_missing_check` as an absolute `blocked`/Mandatory-HITL condition, the same as the other 3 Critical rules — it must NOT be left as just a 2-point score weight, or a low-risk case with a missing follow-up could wrongly auto-approve. |
 
 ---
 
@@ -647,6 +662,8 @@ Every FA5-vs-`rules.yaml`/sample discrepancy found so far, consolidated here. No
 - P1020's missing address is an intentionally soft gap (weight 1) — it still auto-approves.
 - P1021 combines an unpaid bill with a null address/follow-up and Hindi source text.
 - Bill source binaries often lack an `.ocr.txt` sidecar; prefer the JSON companion file when present.
+- `follow_up_missing_check` MUST be coded as an absolute block (like the other 3 Critical Table 4 rules), even though `rules.yaml` only gives it a 2-point score weight — do not trust the weight alone (§16 row 12).
+- Elicitation is exactly **one** batched `ctx.elicit()` call per case covering all non-blocking gaps — never one call per field; decline/cancel on that one call forces Mandatory HITL, it never gets averaged away by a low risk score.
 
 ---
 
