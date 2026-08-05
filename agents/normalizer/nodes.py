@@ -20,6 +20,7 @@ from shared.clinical_normalize import post_normalize_extraction
 from shared.language import (
     detect_source_language,
     get_primary_language_codes,
+    is_english,
     language_path,
     normalize_lang_code,
 )
@@ -80,8 +81,34 @@ def _clinical_text_blob(extraction: dict) -> str:
     return json.dumps(extraction, ensure_ascii=False, indent=2)
 
 
+def _is_empty(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, (list, dict)) and len(value) == 0:
+        return True
+    return False
+
+
+def _deep_merge_prefer_filled(base: object, overlay: object) -> object:
+    """Merge overlay onto base; never let null/empty wipe a filled source value."""
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        out = dict(base)
+        for key, oval in overlay.items():
+            if key not in out:
+                if not _is_empty(oval):
+                    out[key] = oval
+                continue
+            out[key] = _deep_merge_prefer_filled(out[key], oval)
+        return out
+    if _is_empty(overlay):
+        return base
+    return overlay
+
+
 def _apply_translated_overlay(extraction: dict, translated_text: str) -> dict:
-    """Merge Sampling output back into the extraction dict."""
+    """Merge Sampling output back into the extraction dict (preserve filled fields)."""
     result = json.loads(json.dumps(extraction))  # deep copy via JSON
     try:
         overlay = json.loads(translated_text)
@@ -95,10 +122,7 @@ def _apply_translated_overlay(extraction: dict, translated_text: str) -> dict:
         return result
 
     if any(k in overlay for k in ("discharge", "lab", "bill", "patient_id")):
-        for key in ("discharge", "lab", "bill", "patient_id", "source_files", "notes"):
-            if key in overlay and overlay[key] is not None:
-                result[key] = overlay[key]
-        return result
+        return _deep_merge_prefer_filled(result, overlay)
 
     return result
 
@@ -228,7 +252,8 @@ async def assemble_node(state: NormalizerState) -> dict:
             if isinstance(maybe, dict) and (
                 "discharge" in maybe or "lab" in maybe or "bill" in maybe
             ):
-                normalized = maybe
+                # Prefer filled source fields over empty translated slots
+                normalized = _deep_merge_prefer_filled(extraction, maybe)
                 if "patient_id" not in normalized:
                     normalized["patient_id"] = state["patient_id"]
         except json.JSONDecodeError:
@@ -249,6 +274,10 @@ async def assemble_node(state: NormalizerState) -> dict:
             section["language"] = "en"
 
     detected = normalize_lang_code(bridge.get("source_language") or source_language)
+    # English source text is already usable — don't let a timid model score
+    # drop a clean case below the quality threshold (rules.yaml 0.70).
+    if is_english(detected):
+        confidence = max(float(confidence), 0.95)
     path = language_path(detected)
     if path == "fallback":
         primary = "/".join(get_primary_language_codes())

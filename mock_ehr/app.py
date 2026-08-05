@@ -14,7 +14,7 @@ from fastapi import FastAPI
 
 from mock_ehr.routes import router
 from shared.logger import get_logger
-from shared.settings import get_service
+from shared.settings import get_service, listen_host
 
 logger = get_logger("mock_ehr")
 
@@ -39,7 +39,7 @@ def on_startup() -> None:
 def main() -> None:
     """Start uvicorn using host/port from configs/agent_config.yaml."""
     svc = get_service("mock_ehr")
-    host = svc.get("host", "127.0.0.1")
+    host = listen_host(svc.get("host", "127.0.0.1"))
     port = int(svc.get("port", 8050))
     uvicorn.run("mock_ehr.app:app", host=host, port=port, reload=False)
 

@@ -10,14 +10,14 @@ import uvicorn
 
 from agents.monitor.a2a import build_a2a_app
 from shared.logger import get_logger
-from shared.settings import get_service
+from shared.settings import get_service, listen_host
 
 logger = get_logger("monitor")
 
 
 def main() -> None:
     svc = get_service("monitor")
-    host = svc.get("host", "127.0.0.1")
+    host = listen_host(svc.get("host", "127.0.0.1"))
     port = int(svc.get("port", 8103))
 
     app = build_a2a_app()

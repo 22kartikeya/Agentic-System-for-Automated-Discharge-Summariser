@@ -15,9 +15,12 @@ data/reports/*.log
 data/reports/*.json
 data/reports/*.html
 data/reports/*.pdf
+data/reports/traces/
 data/vector_db/*
 !data/vector_db/.gitkeep
 data/rag_sessions/*
 !data/rag_sessions/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
+data/hitl/*
+!data/hitl/.gitkeep
+logs/
+*.log

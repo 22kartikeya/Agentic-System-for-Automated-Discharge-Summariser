@@ -126,7 +126,7 @@ def register_lang_bridge_tools(mcp: FastMCP) -> None:
             )
 
         preferences = build_model_preferences(lang)
-        max_tokens = max(get_bedrock_config()["max_tokens"], 2000)
+        max_tokens = max(int(get_bedrock_config()["max_tokens"]), 4096)
         path = language_path(lang)
         abbrev = _abbreviation_block()
         user_msg = (

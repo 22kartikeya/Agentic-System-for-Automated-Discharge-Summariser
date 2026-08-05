@@ -17,9 +17,21 @@ todos:
   - id: phase-5-lang-bridge-normalizer
     content: "Phase 5: Medical Lang Bridge + Sampling + Normalizer :8102 (completed)"
     status: completed
-  - id: phase-6-plus-pipeline
-    content: "Phases 6–12 (later): validation tools → Validator gate → Summary → RAG → HITL → Host"
-    status: pending
+  - id: phase-6-8-validation-gate
+    content: "Phases 6-8: Rules Engine + EHR Validation + Reporter + Secondary MCP :8201 + Validator gate :8101 (completed)"
+    status: completed
+  - id: phase-9-summary
+    content: "Phase 9: Summary Generator Google ADK streaming :8104 (completed)"
+    status: completed
+  - id: phase-10-rag
+    content: "Phase 10: Agno RAG 5 agents FAISS streaming :8105 (completed)"
+    status: completed
+  - id: phase-11-hitl
+    content: "Phase 11: Streamlit HITL dashboard :8501 (5 pages + ingest + elicitation) (completed)"
+    status: completed
+  - id: phase-12-host
+    content: "Phase 12: Host ADK + Gradio :8083 + run.py launcher (completed)"
+    status: completed
 isProject: false
 ---
 

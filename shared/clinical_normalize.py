@@ -49,8 +49,18 @@ _DIAGNOSIS_KEYS = {
     "primary_diagnosis",
     "secondary_diagnosis",
     "diagnoses",
+    "discharge_diagnosis",
     "dx",
     "condition",
+}
+
+# Allergy (canonical, lowercase) -> medicine names that conflict with it (§12.3
+# point 1 — cross-reactivity, not string-equality). Amoxicillin and its
+# combinations conflict with a Penicillin allergy (P1004, P1016, P1022, P1024).
+ALLERGY_CONFLICT_MAP: dict[str, list[str]] = {
+    "penicillin": ["Penicillin", "Amoxicillin", "Amoxicillin-Clavulanate", "Ampicillin"],
+    "sulfa": ["Sulfamethoxazole", "Trimethoprim-Sulfamethoxazole", "Sulfasalazine"],
+    "latex": [],  # no medicine-name conflict — informational allergy only
 }
 
 
@@ -202,6 +212,26 @@ def apply_icd10_map(extraction: dict, icd10_map: dict[str, str] | None = None) -
         return out
 
     return fix_obj(extraction)
+
+
+def medication_conflicts_with_allergy(med_name: str, allergies: list[str]) -> str | None:
+    """Return the matching allergy (as documented) if med_name conflicts, else None.
+
+    Canonicalizes med_name first, then checks it against each allergy's
+    conflict list (ALLERGY_CONFLICT_MAP) plus the allergy name itself —
+    catches both "med IS the allergen" and "med is a cross-reactive drug".
+    """
+    canon = canonicalize_med_name(med_name).strip().lower()
+    if not canon:
+        return None
+    for allergy in allergies or []:
+        allergy_key = str(allergy).strip().lower()
+        if not allergy_key:
+            continue
+        conflicts = [allergy_key] + [c.lower() for c in ALLERGY_CONFLICT_MAP.get(allergy_key, [])]
+        if any(canon == c or canon.startswith(c) or c in canon for c in conflicts):
+            return allergy
+    return None
 
 
 def post_normalize_extraction(

@@ -49,6 +49,7 @@ def register_resources(mcp: FastMCP) -> None:
             "clinical_validation_policies": rules.get("clinical_validation_policies", {}),
             "risk_scoring_matrix": rules.get("risk_scoring_matrix", {}),
             "business_rules": rules.get("business_rules", {}),
+            "quality_thresholds": rules.get("quality_thresholds", {}),
         }
         return yaml.safe_dump(payload, sort_keys=False)
 

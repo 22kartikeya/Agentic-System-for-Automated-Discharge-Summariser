@@ -8,14 +8,10 @@ import aiofiles
 import yaml
 
 from mcp_servers.primary.roots import assert_inside_root, sanitize_patient_id
+from shared.rules_config import load_rules  # re-exported for existing imports
 from shared.settings import get_path
 
-
-def load_rules() -> dict:
-    """Load runtime configs/rules.yaml."""
-    path = get_path("rules_yaml")
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+__all__ = ["load_rules", "load_prompts_config", "find_patient_file", "read_text_file"]
 
 
 def load_prompts_config() -> dict:

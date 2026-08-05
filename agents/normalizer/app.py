@@ -10,14 +10,14 @@ import uvicorn
 
 from agents.normalizer.a2a import build_a2a_app
 from shared.logger import get_logger
-from shared.settings import get_service
+from shared.settings import get_service, listen_host
 
 logger = get_logger("normalizer")
 
 
 def main() -> None:
     svc = get_service("normalizer")
-    host = svc.get("host", "127.0.0.1")
+    host = listen_host(svc.get("host", "127.0.0.1"))
     port = int(svc.get("port", 8102))
 
     app = build_a2a_app()

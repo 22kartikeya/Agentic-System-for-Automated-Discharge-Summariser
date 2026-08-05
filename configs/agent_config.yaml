@@ -108,6 +108,17 @@ services:
     a2a_streaming: true
     num_history_runs: 3
     refusal_text: "I don't know — this information is not available in the patient records."
+    # Retrieval / chunking (FA5 names top-k; numeric default from coding_style/rag.txt)
+    top_k: 4
+    # Slightly wider retrieve helps multilingual questions whose top hit is not the med table
+    retrieve_k: 6
+    chunk_size: 500
+    chunk_overlap: 50
+    # FAISS cosine (normalized IP). In-context ≈0.34+; World-Cup OOC ≈0.17–0.22.
+    # Used when keyword overlap is 0 (common for EN questions on ES/NL/HI docs).
+    min_similarity: 0.28
+    session_db_file: rag_sessions.db
+    session_table: agent_sessions
 
   host_orchestrator:
     name: Host Orchestrator

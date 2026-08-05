@@ -19,6 +19,12 @@ AGENT_CONFIG_PATH = REPO_ROOT / "configs" / "agent_config.yaml"
 # each entrypoint calling load_dotenv() itself.
 load_dotenv(REPO_ROOT / ".env")
 
+# Strip CR/whitespace from env values (Windows CRLF .env files otherwise
+# poison Bedrock region/model ids and break live LLM calls).
+for _k, _v in list(os.environ.items()):
+    if _v and ("\r" in _v or _v != _v.strip()):
+        os.environ[_k] = _v.replace("\r", "").strip()
+
 # Cache so we do not re-read the YAML on every call
 _config: dict | None = None
 
@@ -33,11 +39,28 @@ def load_agent_config() -> dict:
 
 
 def get_service(name: str) -> dict:
-    """Return one service block, e.g. get_service('mock_ehr')."""
+    """Return one service block, e.g. get_service('mock_ehr').
+
+    Host in YAML is the *client* address (usually 127.0.0.1). Use
+    ``listen_host()`` when binding a server socket (NuvePro may set
+    BIND_HOST=0.0.0.0).
+    """
     services = load_agent_config().get("services", {})
     if name not in services:
         raise KeyError(f"Unknown service in agent_config.yaml: {name}")
     return services[name]
+
+
+def listen_host(service_host: str | None = None) -> str:
+    """Host to bind servers on.
+
+    Prefer BIND_HOST from the environment (NuvePro / cloud labs often need
+    ``0.0.0.0``). Otherwise use the YAML service host.
+    """
+    bind = (os.environ.get("BIND_HOST") or "").strip()
+    if bind:
+        return bind
+    return (service_host or "127.0.0.1").strip() or "127.0.0.1"
 
 
 def get_path(key: str) -> Path:
@@ -56,5 +79,6 @@ def get_bedrock_config() -> dict:
     return {
         "model_id": os.environ.get("BEDROCK_PRIMARY_MODEL_ID", "amazon.nova-lite-v1:0"),
         "region_name": os.environ.get("AWS_REGION_NAME") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-        "max_tokens": int(os.environ.get("BEDROCK_MAX_TOKENS", "500")),
+        # Discharge structured extraction needs headroom; 500 truncates meds/tables.
+        "max_tokens": int(os.environ.get("BEDROCK_MAX_TOKENS", "4096")),
     }

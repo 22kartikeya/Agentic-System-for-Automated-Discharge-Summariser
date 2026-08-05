@@ -667,15 +667,15 @@ Every FA5-vs-`rules.yaml`/sample discrepancy found so far, consolidated here. No
 
 ## 17. Deliverables Checklist
 
-- [ ] Three frameworks (LangGraph, ADK, Agno) coordinated by Host Orchestrator
-- [ ] Dual MCP servers; all 6 primitives demonstrable
-- [ ] A2A streaming + non-streaming + shared-secret auth
-- [ ] Full pipeline: monitor → extract → normalize → validate → report → summary
-- [ ] Streamlit HITL, 5 pages, with elicitation + re-run
-- [ ] Agentic RAG with FAISS + RAG Triad reflection + exact refusal string
-- [ ] RAI guardrails + LangFuse observability
-- [ ] Mock EHR FastAPI built from the provided seed
-- [ ] Config-driven validation via `rules.yaml`
+- [x] Three frameworks (LangGraph, ADK, Agno) coordinated by Host Orchestrator
+- [x] Dual MCP servers; all 6 primitives demonstrable
+- [x] A2A streaming + non-streaming + shared-secret auth
+- [x] Full pipeline: monitor → extract → normalize → validate → report → summary
+- [x] Streamlit HITL, 5 pages, with elicitation + re-run
+- [x] Agentic RAG with FAISS + RAG Triad reflection + exact refusal string
+- [x] RAI guardrails + LangFuse observability
+- [x] Mock EHR FastAPI built from the provided seed
+- [x] Config-driven validation via `rules.yaml`
 - [ ] Deployable on NuvePro Lab
 
 ---
