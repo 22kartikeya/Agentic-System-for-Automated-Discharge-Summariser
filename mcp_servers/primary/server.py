@@ -1,6 +1,7 @@
 """Primary Clinical Tools MCP Server — port 8200, path /clinicaltools.
 
-Phase 2: Resources + Prompts only (tools / Sampling / Elicitation / Roots later).
+Phase 2 added Resources + Prompts. Phase 3 added the Clinical Watcher tool
+(Tools + Roots). Sampling / Elicitation / remaining Tools land in later phases.
 
 Run from repo root:
     uv run python -m mcp_servers.primary

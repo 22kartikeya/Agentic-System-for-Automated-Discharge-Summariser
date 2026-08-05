@@ -90,15 +90,19 @@ def _tool_result_to_text(result: object) -> str:
 # ---------------------------------------------------------------------------
 # Google ADK agent (framework identity — SSoT §2 row 1)
 # ---------------------------------------------------------------------------
-# Phase 3 A2A executor calls discover_clinical_intake() directly so we can
-# test Roots/Watcher without an LLM API key. Host can later run this LlmAgent
-# with a real model when keys are configured.
+# Monitor's job (§5.1) is a deterministic scan — no clinical reasoning needed —
+# so the Phase-3 A2A executor calls discover_clinical_intake() directly and
+# does not run this LlmAgent through an ADK Runner yet. That avoids requiring
+# an LLM API key / LiteLLM (arrives in Phase 5, SSoT §3.6) just to list files.
+# monitor_agent is kept as the real ADK object (framework identity, §2 row 1)
+# and Host (Phase 12) can run it through a Runner once a model is wired.
+# model= is a placeholder only — never invoked in Phase 3.
 
 discover_tool = FunctionTool(discover_clinical_intake)
 
 monitor_agent = LlmAgent(
     name="discharge_monitor",
-    model=os.environ.get("MONITOR_MODEL", "gemini-2.0-flash"),
+    model=os.environ.get("MONITOR_MODEL", "gemini-2.0-flash"),  # placeholder, unused in Phase 3
     description=(
         "Discharge Monitor Agent. Discovers new hospital discharge documents "
         "via MCP Roots and the Clinical Watcher tool."

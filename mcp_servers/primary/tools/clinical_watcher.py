@@ -78,7 +78,12 @@ def register_watcher_tools(mcp: FastMCP) -> None:
             "Discover new discharge, lab, and bill files inside MCP Roots. "
             "Uses ctx.list_roots() only — never pass raw filesystem paths."
         ),
-        annotations={"readOnlyHint": True, "destructiveHint": False},
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     )
     async def clinical_watcher(ctx: Context) -> str:
         """List intake files under all Roots declared by the MCP client."""
