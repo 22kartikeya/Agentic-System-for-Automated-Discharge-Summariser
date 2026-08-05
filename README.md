@@ -23,7 +23,12 @@ Run the services that exist so far (each in its own terminal):
 uv run python -m mock_ehr          # Mock EHR REST API on :8050
 uv run python -m mcp_servers.primary  # Primary MCP (clinicaltools) on :8200
 uv run python -m agents.monitor    # Discharge Monitor A2A service on :8103
+uv run python -m agents.extractor  # Clinical Extractor A2A service on :8100
 ```
+
+Extractor needs AWS Bedrock credentials in `.env` (see `.env.example`) to structure
+free-text/OCR sources; already-structured JSON intake files are mapped directly
+and need no LLM call.
 
 Host/port for every service come from [`configs/agent_config.yaml`](configs/agent_config.yaml).
 
@@ -36,7 +41,7 @@ Built bottom-up, one phase at a time, per the phased roadmap. Each ✅ phase has
 | 1 | `shared/` config + logger, Mock EHR FastAPI `:8050` (seeded from `mock_ehr/seed.py`) | ✅ done |
 | 2 | Primary MCP skeleton `:8200/clinicaltools` — resources (`rules.yaml`) + prompts | ✅ done |
 | 3 | MCP Roots + Clinical Watcher tool + Discharge Monitor agent (`:8103`, A2A) | ✅ done |
-| 4 | Clinical Data Harvester tool + Extractor agent | ⏳ stub |
+| 4 | Clinical Data Harvester tool + Extractor agent (`:8100`, LangGraph, A2A) | ✅ done |
 | 5 | Medical Lang Bridge + Sampling + Normalizer agent | ⏳ stub |
 | 6–7 | Rules Engine / EHR Validation / Insight Reporter tools + Secondary MCP `:8201` | ⏳ stub |
 | 8 | Validator agent + release gate | ⏳ stub |
@@ -49,9 +54,9 @@ Built bottom-up, one phase at a time, per the phased roadmap. Each ✅ phase has
 
 | Folder | Role |
 | --- | --- |
-| `agents/` | Monitor (✅), Extractor, Normalizer, Validator, Summary (A2A) |
+| `agents/` | Monitor (✅), Extractor (✅), Normalizer, Validator, Summary (A2A) |
 | `rag/` | Agno 5-agent RAG Q&A (:8105 streaming) |
-| `mcp_servers/` | Primary `:8200/clinicaltools` (resources/prompts/watcher ✅) + Secondary `:8201/analyticstools` |
+| `mcp_servers/` | Primary `:8200/clinicaltools` (resources/prompts/watcher/harvester ✅) + Secondary `:8201/analyticstools` |
 | `host/` | Google ADK + Gradio orchestrator (:8083) |
 | `dashboard/` | Streamlit HITL 5 pages (:8501) |
 | `mock_ehr/` | FastAPI Mock EHR (:8050) ✅ |
@@ -66,6 +71,17 @@ Built bottom-up, one phase at a time, per the phased roadmap. Each ✅ phase has
 curl http://127.0.0.1:8050/health
 curl http://127.0.0.1:8050/patients/P1019
 
-# Primary MCP resources/prompts — use an MCP client (FastMCP CLI, Inspector, etc.)
+# Primary MCP (Watcher + Harvester) — FastMCP Inspector / CLI
 uv run fastmcp dev mcp_servers/primary/server.py
+
+# Extractor LangGraph pipeline (needs Primary MCP up; Bedrock for .txt/OCR only)
+uv run python -c "
+import asyncio, json
+from agents.extractor.graph import run_extraction
+print(json.dumps(asyncio.run(run_extraction('P1019')), indent=2, ensure_ascii=False))
+"
+
+# A2A AgentCards (public)
+curl http://127.0.0.1:8103/.well-known/agent.json
+curl http://127.0.0.1:8100/.well-known/agent.json
 ```

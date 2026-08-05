@@ -16,8 +16,9 @@ from google.adk.tools import FunctionTool
 from mcp.types import Root
 
 from mcp_servers.primary.roots import path_to_file_uri
+from shared.a2a_auth import get_a2a_auth_token
 from shared.logger import get_logger
-from shared.settings import get_path, get_service, load_agent_config
+from shared.settings import get_path, get_service
 
 logger = get_logger("monitor")
 
@@ -123,8 +124,5 @@ def build_monitor_agent() -> LlmAgent:
     return monitor_agent
 
 
-def get_a2a_auth_token() -> str:
-    """Shared secret for X-Agent-Auth-Token (SSoT §4)."""
-    cfg = load_agent_config()
-    env_name = cfg.get("a2a", {}).get("auth_token_env", "AGENT_AUTH_TOKEN")
-    return os.environ.get(env_name, "change-me-local-dev-token")
+# Re-exported so agents/monitor/a2a.py can keep importing it from here.
+__all__ = ["discover_clinical_intake", "get_clinical_root", "build_monitor_agent", "get_a2a_auth_token"]

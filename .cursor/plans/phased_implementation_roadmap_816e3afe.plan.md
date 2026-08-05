@@ -11,8 +11,11 @@ todos:
   - id: phase-3-monitor-roots
     content: "Phase 3 (later): Watcher + Roots + Discharge Monitor :8103"
     status: completed
-  - id: phase-4-plus-pipeline
-    content: "Phases 4–12 (later): Extractor → Normalizer → validation tools → Validator gate → Summary → RAG → HITL → Host"
+  - id: phase-4-harvester-extractor
+    content: "Phase 4: Clinical Data Harvester tool + Extractor agent :8100 (completed)"
+    status: completed
+  - id: phase-5-plus-pipeline
+    content: "Phases 5–12 (later): Normalizer → validation tools → Validator gate → Summary → RAG → HITL → Host"
     status: pending
 isProject: false
 ---
