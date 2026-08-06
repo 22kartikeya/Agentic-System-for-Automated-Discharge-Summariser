@@ -70,6 +70,23 @@ def case_to_index_text(case: dict[str, Any]) -> str:
     if case.get("ward") or case.get("bed_no"):
         lines.append(f"Ward/Bed: {case.get('ward') or ''} / {case.get('bed_no') or ''}")
 
+    attending = case.get("attending_physician")
+    if attending not in (None, ""):
+        lines.append(f"Attending Physician: {attending}")
+    consulting = case.get("consulting_doctors") or []
+    if isinstance(consulting, str):
+        consulting = [p.strip() for p in consulting.split(",") if p.strip()]
+    if not consulting and case.get("doctors") and not attending:
+        doctors = case.get("doctors") or []
+        if isinstance(doctors, str):
+            doctors = [p.strip() for p in doctors.split(",") if p.strip()]
+        consulting = list(doctors)
+    if consulting:
+        lines.append(
+            "Consulting Doctors: "
+            + ", ".join(str(d).strip() for d in consulting if str(d).strip())
+        )
+
     dx = case.get("discharge_diagnosis") or []
     if isinstance(dx, str):
         dx = [dx]

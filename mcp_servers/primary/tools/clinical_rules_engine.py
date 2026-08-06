@@ -249,20 +249,39 @@ def register_rules_engine_tools(mcp: FastMCP) -> None:
         if to_elicit:
             schema = build_missing_fields_schema(to_elicit)
             logger.info("Eliciting %s missing field(s) for %s", len(to_elicit), patient_id)
-            result = await ctx.elicit(
-                message=(
-                    f"Patient {patient_id}: please supply these missing discharge "
-                    f"fields if available, or decline: {', '.join(to_elicit)}"
-                ),
-                response_type=schema,
-            )
-            elicitation_outcome = result.action
-            if result.action == "accept" and result.data is not None:
-                elicited_values = result.data.model_dump(exclude_none=True)
-                discharge = _apply_elicited_values(extraction.get("discharge") or {}, elicited_values)
-                updated_extraction = dict(extraction)
-                updated_extraction["discharge"] = discharge
-                to_elicit = [f for f in to_elicit if f not in elicited_values]
+            try:
+                result = await ctx.elicit(
+                    message=(
+                        f"Patient {patient_id}: please supply these missing discharge "
+                        f"fields if available, or decline: {', '.join(to_elicit)}"
+                    ),
+                    response_type=schema,
+                )
+                elicitation_outcome = result.action
+                if result.action == "accept" and result.data is not None:
+                    raw = result.data
+                    if hasattr(raw, "model_dump"):
+                        elicited_values = raw.model_dump(exclude_none=True)
+                    elif isinstance(raw, dict):
+                        elicited_values = {
+                            k: v for k, v in raw.items() if v is not None
+                        }
+                    else:
+                        elicited_values = {}
+                    discharge = _apply_elicited_values(
+                        extraction.get("discharge") or {}, elicited_values
+                    )
+                    updated_extraction = dict(extraction)
+                    updated_extraction["discharge"] = discharge
+                    to_elicit = [f for f in to_elicit if f not in elicited_values]
+            except Exception as exc:
+                # Bad accept payload must not abort the whole Rules Engine tool
+                logger.warning(
+                    "Elicitation failed for %s (%s) — treating as decline",
+                    patient_id,
+                    exc,
+                )
+                elicitation_outcome = "decline"
 
         payload = {
             "patient_id": patient_id,

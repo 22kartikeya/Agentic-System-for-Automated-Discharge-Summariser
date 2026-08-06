@@ -69,4 +69,16 @@ async def run_validation(patient_id: str, normalization: dict) -> dict:
     config = {"configurable": {"thread_id": f"validator-{patient_id}-{tid[:8]}"}}
     final_state = await validator_graph.ainvoke(initial_state, config=config)
     flush()
-    return final_state["report"]
+    # Report alone used to drop elicitation fills — attach post-callback extraction
+    # so HITL / RAG can index attending / age / etc. the Rules Engine just applied.
+    report = final_state.get("report") or {}
+    if not isinstance(report, dict):
+        report = {"report": report}
+    else:
+        report = dict(report)
+    report["extraction_after_elicitation"] = final_state.get("extraction") or {}
+    if final_state.get("elicitation_outcome") is not None:
+        report.setdefault("elicitation_outcome", final_state.get("elicitation_outcome"))
+    if final_state.get("missing_fields") is not None:
+        report["validator_missing_fields"] = list(final_state.get("missing_fields") or [])
+    return report

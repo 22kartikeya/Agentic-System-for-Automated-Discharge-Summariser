@@ -31,13 +31,15 @@ async def _e2e_accept_elicitation(message, response_type, params, context):
     if response_type is not None:
         try:
             model = response_type(**data) if data else response_type()
-            return ElicitResult(action="accept", data=model)
+            payload = model.model_dump(exclude_none=True)
+            return ElicitResult(action="accept", content=payload)
         except Exception:
             try:
-                return ElicitResult(action="accept", data=response_type())
+                payload = response_type().model_dump(exclude_none=True)
+                return ElicitResult(action="accept", content=payload)
             except Exception:
                 pass
-    return ElicitResult(action="accept", data=data)
+    return ElicitResult(action="accept", content=dict(data))
 
 OUT = ROOT / "data" / "reports" / "e2e_exhaustive_results.json"
 

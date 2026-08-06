@@ -278,6 +278,26 @@ def case_from_normalization(norm: dict[str, Any]) -> dict[str, Any]:
     return case
 
 
+def case_after_validation(
+    norm: dict[str, Any],
+    report: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build HITL case preferring extraction after Rules Engine elicitation.
+
+    ``run_validation`` returns the audit report plus
+    ``extraction_after_elicitation`` (callback fills). Critical edits alone
+    used to reindex from pre-validate ``norm``, which dropped soft elicitation.
+    """
+    post = (report or {}).get("extraction_after_elicitation")
+    if isinstance(post, dict) and post:
+        base = dict(norm or {})
+        base["normalized_extraction"] = post
+        if not base.get("patient_id"):
+            base["patient_id"] = (report or {}).get("patient_id") or norm.get("patient_id")
+        return case_from_normalization(base)
+    return case_from_normalization(norm or {})
+
+
 def case_to_normalization(case: dict[str, Any]) -> dict[str, Any]:
     """Push HITL case edits back into a NormalizationResult-shaped dict."""
     base = dict(case.get("_normalization") or {})
@@ -539,15 +559,21 @@ def revalidate_case(
     try:
         report = _run(_go())
         validation = normalize_validation(report)
-        updated = case_from_normalization(norm)
+        updated = case_after_validation(norm, report if isinstance(report, dict) else None)
         # Preserve bill/med edits from the working case
         updated["medications"] = case.get("medications") or updated.get("medications")
         updated["allergies"] = case.get("allergies") or updated.get("allergies")
         updated["bill"] = case.get("bill") or updated.get("bill")
         updated["follow_up_appointment"] = case.get("follow_up_appointment")
         updated["discharge_ok"] = case.get("discharge_ok")
-        updated["_normalization"] = norm
-        updated["_normalized_extraction"] = norm.get("normalized_extraction")
+        if elicit_answers:
+            for key, val in elicit_answers.items():
+                if val not in ("", None):
+                    updated[key] = val
+        updated["_normalization"] = updated.get("_normalization") or norm
+        # Keep post-elicitation extraction on the case (do not wipe with pre-validate norm)
+        if isinstance(report, dict) and isinstance(report.get("extraction_after_elicitation"), dict):
+            updated["_normalized_extraction"] = report["extraction_after_elicitation"]
         return {"case": updated, "result": validation}
     except Exception as exc:
         return {"case": case, "result": None, "error": str(exc)}

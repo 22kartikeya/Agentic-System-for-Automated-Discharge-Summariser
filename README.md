@@ -112,13 +112,14 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 - FAISS per `patient_id` under `data/vector_db/{patient_id}/`; MiniLM embeddings.
 - Generation uses MCP `rag-answer-prompt`, `MultiMCPTools`, SqliteDb (`num_history_runs=3`).
 - Out-of-context → exact refusal from `agent_config.yaml`. RAG Triad gated by `rules.yaml` thresholds.
+- After Corrections **Re-run**, FAISS rebuilds from HITL-reviewed discharge facts **including accepted elicitation fields** (e.g. attending physician).
 
 ### Phase 11 — HITL Streamlit
 
 - Single app (`dashboard/app.py`) on `:8501` — five clinical pages (Document Viewer, Validation Report, Corrections, RAG Q&A, Discharge Summary) plus **Upload new patients**.
 - Sidebar **live patient search** (ID or name) over files under `data/input/` — no hard-coded sample list.
 - **Process patient** runs extract → normalize → validate in-process (MCP + Bedrock); pages degrade when backends are offline.
-- Corrections: `st.data_editor`, elicitation accept/decline/cancel, approval, re-run; feedback under `data/hitl/`.
+- Corrections: `st.data_editor`, elicitation accept/decline/cancel, approval, re-run (re-indexes RAG with elicited fields); feedback under `data/hitl/`.
 
 ### Phase 12 — Host
 

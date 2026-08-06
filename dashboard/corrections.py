@@ -554,6 +554,7 @@ def page_corrections(
             clean["follow_up_appointment"] = case["follow_up_appointment"]
         stage_elicitation_response("accept", clean)
         st.session_state["elicitation_values"] = clean
+        st.session_state["elicitation_values_pid"] = pid
         save_feedback(
             pid,
             {
@@ -667,6 +668,12 @@ def page_corrections(
             elicit_values = dict(st.session_state.get("elicitation_values") or {})
             if st.session_state.get("elicitation_values_pid") != pid:
                 elicit_values = {}
+            # Disk feedback fallback (Accept may have been last session)
+            fb_elicit = feedback.get("elicited_values") if isinstance(feedback, dict) else None
+            if isinstance(fb_elicit, dict) and feedback.get("elicitation_action") == "accept":
+                for k, v in fb_elicit.items():
+                    if v not in ("", None) and k not in elicit_values:
+                        elicit_values[k] = v
             # Re-run should use the form on this page even if Accept was not clicked
             form_vals = {
                 k: v for k, v in (elicited or {}).items() if v not in ("", None)
@@ -718,7 +725,10 @@ def page_corrections(
 
             norm, report = asyncio.run(_run())
             validation = bridge.normalize_validation(report) or {}
-            case_out = bridge.case_from_normalization(norm)
+            # Prefer post-elicitation extraction (MCP callback fills) for RAG case
+            case_out = bridge.case_after_validation(
+                norm, report if isinstance(report, dict) else None
+            )
             # Keep reviewer edits on the working case (this patient only)
             meds = [
                 m
@@ -736,6 +746,17 @@ def page_corrections(
                 ]
             if "discharge_ok" in working_case:
                 case_out["discharge_ok"] = bool(working_case.get("discharge_ok"))
+
+            # Elicitation answers must land on the case for RAG (not only validate)
+            for key, val_e in (elicit_values or {}).items():
+                if val_e in ("", None):
+                    continue
+                if key in {"consulting_doctors", "allergies"} and isinstance(val_e, str):
+                    case_out[key] = [
+                        p.strip() for p in val_e.split(",") if p.strip()
+                    ]
+                else:
+                    case_out[key] = val_e
 
             st.session_state.summary = None
             index_out = bridge.reindex_after_hitl(case_out)
