@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -147,7 +148,14 @@ def normalize_validation(report: dict[str, Any] | None) -> dict[str, Any] | None
         field = str(f.get("field") or "").strip()
         rule = str(f.get("rule_id") or "")
         if rule.startswith("elicitation_"):
-            # Gate note only — keep out of clinical Blocking gaps list.
+            # Gate note — show elicited field names under Soft gaps for the reviewer.
+            msg = str(f.get("message") or "")
+            m = re.search(r"\(([^)]+)\)", msg)
+            if m and "no fields listed" not in m.group(1).lower():
+                for part in m.group(1).split(","):
+                    name = part.strip()
+                    if name and name not in soft:
+                        soft.append(name)
             continue
         if rule in {"missing_address", "missing_gender"} and field:
             soft.append(field)
@@ -193,16 +201,69 @@ def normalize_validation(report: dict[str, Any] | None) -> dict[str, Any] | None
     }
 
 
+def fetch_ehr_medications(patient_id: str) -> list[dict[str, Any]]:
+    """Load Mock EHR meds for HITL table seed (any patient_id). Never invent rows."""
+    pid = str(patient_id or "").strip().upper()
+    if not pid:
+        return []
+    try:
+        import httpx
+        from shared.settings import get_service
+
+        ehr = get_service("mock_ehr")
+        base = f"http://{ehr.get('host', '127.0.0.1')}:{int(ehr.get('port', 8050))}"
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(f"{base}/patients/{pid}/medications")
+            if resp.status_code != 200:
+                return []
+            payload = resp.json()
+        raw = payload.get("medications") if isinstance(payload, dict) else payload
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for m in raw:
+            if not isinstance(m, dict):
+                continue
+            name = (m.get("name") or m.get("medicine_name") or "").strip()
+            if not name:
+                continue
+            out.append(
+                {
+                    "medicine_name": name,
+                    "name": name,
+                    "strength": m.get("dose") or m.get("strength") or "",
+                    "frequency": m.get("frequency") or "",
+                    "route": m.get("route") or "",
+                    "period": m.get("period") or "",
+                }
+            )
+        return out
+    except Exception as exc:
+        from shared.logger import get_logger
+
+        get_logger("dashboard_bridge").info("EHR meds seed skipped for %s: %s", pid, exc)
+        return []
+
+
 def case_from_normalization(norm: dict[str, Any]) -> dict[str, Any]:
     """Flatten V3 normalization into a HITL working case dict."""
     ne = norm.get("normalized_extraction") or {}
     discharge = dict(ne.get("discharge") or {})
     bill = ne.get("bill") if isinstance(ne.get("bill"), dict) else {}
+    meds = list(discharge.get("medications") or [])
+    meds_source = "discharge"
+    pid = str(norm.get("patient_id") or discharge.get("patient_id") or "").strip().upper()
+    # HITL table must not be blank for new patients — seed from Mock EHR when needed
+    if not meds and pid:
+        ehr_meds = fetch_ehr_medications(pid)
+        if ehr_meds:
+            meds = ehr_meds
+            meds_source = "ehr"
     case: dict[str, Any] = {
         **discharge,
-        "patient_id": norm.get("patient_id") or discharge.get("patient_id"),
+        "patient_id": pid or discharge.get("patient_id"),
         "bill": bill,
-        "medications": list(discharge.get("medications") or []),
+        "medications": meds,
         "allergies": list(discharge.get("allergies") or discharge.get("adr_allergy_info") or []),
         "follow_up_appointment": (
             discharge.get("follow_up_appointment")
@@ -210,6 +271,7 @@ def case_from_normalization(norm: dict[str, Any]) -> dict[str, Any]:
             or ""
         ),
         "discharge_ok": bool(discharge.get("discharge_approved")),
+        "_meds_source": meds_source,
         "_normalization": norm,
         "_normalized_extraction": ne,
     }
@@ -493,14 +555,41 @@ def revalidate_case(
 
 def ensure_indexed(case: dict[str, Any], validation: dict[str, Any] | None) -> dict[str, Any]:
     del validation  # indexing is by patient_id in V3 FAISS path
-    from rag.indexing_agent import run_indexing
+    from rag.indexing_agent import load_hitl_corrected_case, run_indexing
 
     pid = str(case.get("patient_id") or "")
     try:
-        msg = _run(run_indexing(pid))
+        hitl = load_hitl_corrected_case(pid)
+        if hitl is not None:
+            # Refresh FAISS from the latest session case after Corrections
+            corrected = case if isinstance(case, dict) else hitl
+            msg = _run(run_indexing(pid, force=True, corrected_case=corrected))
+        else:
+            msg = _run(run_indexing(pid))
         return {"indexed_chunks": msg, "indexed": True}
     except Exception as exc:
         return {"indexed_chunks": 0, "indexed": False, "error": str(exc)}
+
+
+def reindex_after_hitl(case: dict[str, Any]) -> dict[str, Any]:
+    """Save HITL-corrected case and rebuild FAISS so RAG matches Corrections."""
+    from rag.indexing_agent import run_indexing
+
+    pid = str(case.get("patient_id") or "")
+    if not pid:
+        return {"indexed": False, "error": "missing patient_id"}
+    try:
+        msg = _run(run_indexing(pid, force=True, corrected_case=case))
+        return {"indexed_chunks": msg, "indexed": True}
+    except Exception as exc:
+        return {"indexed_chunks": 0, "indexed": False, "error": str(exc)}
+
+
+def clear_hitl_rag_snapshot(patient_id: str) -> None:
+    """After fresh Process, drop prior HITL snapshot so RAG uses new extract."""
+    from rag.indexing_agent import clear_hitl_corrected_case
+
+    clear_hitl_corrected_case(patient_id)
 
 
 def ask_rag(

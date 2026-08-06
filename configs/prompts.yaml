@@ -46,7 +46,8 @@ prompts:
          match the Mock EHR later (SSoT §12.3). Examples:
          Metformina → Metformin, Atorvastatina → Atorvastatin,
          Aspirina → Aspirin, Amoxicilline → Amoxicillin,
-         Paracetamol → Acetaminophen. Keep dose / frequency text.
+         Acetaminophen → Paracetamol (same drug; keep INN Paracetamol).
+         Keep dose / frequency text.
       4. Keep patient_id, dates, and numeric values unchanged.
       5. When the input is a Clinical extraction JSON, return the SAME JSON
          shape with human-readable string fields translated / normalized

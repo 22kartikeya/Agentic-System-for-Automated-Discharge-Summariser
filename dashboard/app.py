@@ -55,6 +55,16 @@ def _page_header(title: str, lede: str) -> None:
     st.markdown(page_header_html(title, lede), unsafe_allow_html=True)
 
 
+def _bump_meds_editor_epoch() -> None:
+    """Invalidate Streamlit data_editor state so Process/switch cannot keep stale rows."""
+    st.session_state.meds_editor_epoch = int(st.session_state.get("meds_editor_epoch") or 0) + 1
+    for key in list(st.session_state.keys()):
+        k = str(key)
+        # Widget keys only — do not delete the epoch counter itself.
+        if k.startswith("meds_editor_") and k != "meds_editor_epoch":
+            del st.session_state[key]
+
+
 def _clear_case_state() -> None:
     st.session_state.pipeline_result = None
     st.session_state.case = None
@@ -63,6 +73,13 @@ def _clear_case_state() -> None:
     st.session_state.rag_history = []
     st.session_state.doc_count = None
     st.session_state.last_error = None
+    # HITL med/elicitation edits are per-patient — never carry across switches
+    st.session_state.edited_meds = None
+    st.session_state.edited_meds_pid = None
+    st.session_state.edited_meds_epoch = None
+    st.session_state.elicitation_values = {}
+    st.session_state.elicitation_values_pid = None
+    _bump_meds_editor_epoch()
 
 
 def _select_patient(pid: str) -> None:
@@ -235,6 +252,23 @@ def _sync_from_pipeline(out: dict[str, Any]) -> None:
     st.session_state.validation = out.get("validation")
     st.session_state.summary = out.get("summary")
     st.session_state.last_error = out.get("error")
+    # Fresh Process owns meds — drop stale HITL overlays from another patient
+    st.session_state.edited_meds = None
+    st.session_state.edited_meds_pid = None
+    st.session_state.edited_meds_epoch = None
+    st.session_state.elicitation_values = {}
+    st.session_state.elicitation_values_pid = None
+    _bump_meds_editor_epoch()
+    # Disk drafts must not outrank this extract on Corrections
+    pid = str(out.get("patient_id") or st.session_state.get("patient_id") or "")
+    if pid and not out.get("error"):
+        from dashboard.components.common import clear_feedback_medications
+
+        clear_feedback_medications(pid, pipeline_trace_id=out.get("trace_id"))
+        # Fresh Process owns RAG again — drop prior HITL-corrected snapshot
+        from dashboard import bridge as _bridge
+
+        _bridge.clear_hitl_rag_snapshot(pid)
 
 
 def _sync_pipeline_after_hitl(
@@ -515,15 +549,13 @@ def page_documents() -> None:
 
     files = _list_files()
 
-    use_fixture = st.toggle("Lab mode · fixture case after Monitor", value=True)
+    st.caption("Pipeline always reads live intake under `data/input/` for this patient.")
     if st.button("Process patient", type="primary"):
         progress = st.progress(0, text="Starting pipeline…")
         with st.spinner("Running pipeline…"):
             try:
                 progress.progress(15, text="Monitor → Extract → Normalize…")
-                out = bridge.run_host_pipeline(
-                    st.session_state.patient_id, use_fixture=use_fixture
-                )
+                out = bridge.run_host_pipeline(st.session_state.patient_id)
                 progress.progress(85, text="Gate → Summary…")
                 _sync_from_pipeline(out)
                 progress.progress(100, text="Done")
@@ -618,6 +650,21 @@ def page_validation() -> None:
                 )
 
     st.markdown('<div class="section-label">Findings</div>', unsafe_allow_html=True)
+    score = (val.get("risk") or {}).get("score")
+    level = (val.get("risk") or {}).get("level") or val.get("risk_level")
+    outcome = str(val.get("elicitation_outcome") or "").lower()
+    if (
+        str(level).lower() == "high"
+        and (score == 0 or score == "0")
+        and outcome in {"decline", "cancel", "declined", "cancelled"}
+    ):
+        st.info(
+            "Risk is **High** because missing-field elicitation was declined/cancelled "
+            "(Mandatory HITL per SSoT §3.7). The numeric score can stay **0** when there "
+            "are no weighted clinical findings. On Corrections: fill soft fields "
+            "(age / ward / bed / attending), then Re-run validation "
+            "(Accept is applied automatically from the form on Re-run)."
+        )
     if not findings:
         st.markdown(
             '<div class="empty-state empty-ok">'

@@ -24,6 +24,60 @@ from dashboard.state import append_feedback
 from dashboard.ui_chrome import finding_card_html
 from mcp_servers.primary.elicitation import TYPE_HINTS
 
+
+def _meds_for_patient(pid: str, case: dict[str, Any], feedback: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Meds for THIS patient — live Process case first; never auto-load disk feedback.
+
+    ``feedback`` is accepted for call-site compatibility but ignored for the table.
+    """
+    del feedback  # disk drafts must not outrank a fresh Process extract
+    pid = str(pid or "").strip().upper()
+    epoch = st.session_state.get("meds_editor_epoch")
+    if (
+        st.session_state.get("edited_meds_pid") == pid
+        and st.session_state.get("edited_meds") is not None
+        and st.session_state.get("edited_meds_epoch") == epoch
+    ):
+        return list(st.session_state.get("edited_meds") or [])
+    case_meds = list(case.get("medications") or [])
+    if case_meds:
+        return case_meds
+    # Last resort for new patients: seed HITL table from Mock EHR
+    return bridge.fetch_ehr_medications(pid)
+
+
+def _store_edited_meds(pid: str, meds: list[dict[str, Any]]) -> None:
+    """Persist med edits scoped to the active patient_id + Process epoch."""
+    st.session_state["edited_meds"] = meds
+    st.session_state["edited_meds_pid"] = str(pid or "").strip().upper()
+    st.session_state["edited_meds_epoch"] = st.session_state.get("meds_editor_epoch")
+
+
+def _med_rows_equal(a: list[Any], b: list[Any]) -> bool:
+    """Compare med tables ignoring blank rows and key aliases."""
+
+    def _norm(rows: list[Any]) -> list[tuple[str, str, str, str, str]]:
+        out: list[tuple[str, str, str, str, str]] = []
+        for m in rows:
+            if not isinstance(m, dict):
+                continue
+            name = (m.get("medicine_name") or m.get("name") or "").strip()
+            if not name:
+                continue
+            out.append(
+                (
+                    name.lower(),
+                    str(m.get("strength") or "").strip().lower(),
+                    str(m.get("frequency") or "").strip().lower(),
+                    str(m.get("route") or "").strip().lower(),
+                    str(m.get("period") or "").strip().lower(),
+                )
+            )
+        return out
+
+    return _norm(a) == _norm(b)
+
+
 # Extensible Critical → editor map. Unknown rules → panel "other".
 CRITICAL_FIX: dict[str, dict[str, str]] = {
     "allergy_contradiction_check": {
@@ -290,11 +344,15 @@ def page_corrections(
                         flagged.append(name)
             if flagged:
                 st.warning("Flagged: " + ", ".join(flagged))
+                st.caption(
+                    "Removing allergy-conflict drugs from discharge is intentional; "
+                    "Re-run will not treat those EHR orders as med omissions."
+                )
                 if st.button(
                     "Remove flagged medications",
                     key=f"rm_flagged_{pid}",
                 ):
-                    current = list(st.session_state.get("edited_meds") or [])
+                    current = _meds_for_patient(pid, case, feedback)
                     lower = {n.lower() for n in flagged}
                     kept = [
                         m
@@ -302,8 +360,9 @@ def page_corrections(
                         if (m.get("medicine_name") or m.get("name") or "").strip().lower()
                         not in lower
                     ]
-                    st.session_state["edited_meds"] = kept
+                    _store_edited_meds(pid, kept)
                     case["medications"] = kept
+                    case["_meds_source"] = "hitl"
                     st.success(f"Removed {len(current) - len(kept)} row(s). Re-run validation.")
                     st.rerun()
 
@@ -365,26 +424,59 @@ def page_corrections(
 
     # ---- Medication table ----
     st.markdown('<div class="section-label">Medication table</div>', unsafe_allow_html=True)
-    st.caption("Edit rows here (also used to clear allergy / high-risk meds).")
+    default_meds = _meds_for_patient(pid, case, feedback)
+    source = str(case.get("_meds_source") or "")
+    if default_meds and source == "ehr":
+        st.caption(
+            "Seeded from Mock EHR (discharge extract had no meds). "
+            "Edit to match the discharge chart, then Re-run validation."
+        )
+    elif default_meds:
+        st.caption("Edit rows here (also used to clear allergy / high-risk meds).")
+    else:
+        st.caption(
+            "No medications found yet — add rows manually, or Process the patient "
+            "after uploading a discharge note with a prescription table."
+        )
 
-    default_meds = (
-        st.session_state.get("edited_meds")
-        or feedback.get("medications")
-        or case.get("medications")
-        or []
-    )
     rows = _normalize_med_rows(list(default_meds))
+    epoch = st.session_state.get("meds_editor_epoch") or 0
     edited = st.data_editor(
         pd.DataFrame(rows),
         num_rows="dynamic",
         use_container_width=True,
-        key=f"meds_editor_{pid}",
+        key=f"meds_editor_{pid}_{epoch}",
+        column_config={
+            "medicine_name": st.column_config.TextColumn("Medicine", required=False),
+            "strength": st.column_config.TextColumn("Strength"),
+            "frequency": st.column_config.TextColumn("Frequency"),
+            "route": st.column_config.TextColumn("Route"),
+            "period": st.column_config.TextColumn("Period"),
+        },
     )
     meds_out = edited.to_dict(orient="records")
-    st.session_state["edited_meds"] = meds_out
-    case["medications"] = [
-        m for m in meds_out if (m.get("medicine_name") or "").strip()
-    ]
+    # Only persist when the reviewer changed rows — never re-poison case from
+    # a stale Streamlit widget or a no-op render after Process.
+    if not _med_rows_equal(meds_out, rows):
+        _store_edited_meds(pid, meds_out)
+        case["medications"] = [
+            m for m in meds_out if (m.get("medicine_name") or "").strip()
+        ]
+        case["_meds_source"] = "hitl"
+        st.session_state.case = case
+    elif st.session_state.get("edited_meds_pid") == pid and st.session_state.get(
+        "edited_meds_epoch"
+    ) == epoch:
+        # Keep case aligned with in-session edits (e.g. Remove flagged)
+        kept = [
+            m
+            for m in (st.session_state.get("edited_meds") or [])
+            if (m.get("medicine_name") or m.get("name") or "").strip()
+        ]
+        if kept:
+            case["medications"] = kept
+            case["_meds_source"] = "hitl"
+            st.session_state.case = case
 
     # ---- Soft elicitation (HITL-1) — skip fields covered by Critical panels ----
     st.markdown(
@@ -524,7 +616,7 @@ def page_corrections(
 
     if st.button("Save feedback", type="primary", key=f"save_fb_{pid}"):
         payload = {
-            "medications": st.session_state.get("edited_meds"),
+            "medications": _meds_for_patient(pid, case, feedback),
             "bill": case.get("bill"),
             "follow_up_appointment": case.get("follow_up_appointment"),
             "discharge_ok": case.get("discharge_ok"),
@@ -535,6 +627,7 @@ def page_corrections(
             "original_risk_level": current_risk,
             "original_discharge_blocked": (val or {}).get("discharge_blocked"),
             "critical_rules": [i["rule_id"] for i in issues],
+            "pipeline_trace_id": st.session_state.get("trace_id"),
         }
         path = save_feedback(pid, payload)
         st.session_state["hitl_approval"] = approval
@@ -548,7 +641,8 @@ def page_corrections(
         unsafe_allow_html=True,
     )
     st.caption(
-        "Applies critical fixes + staged elicitation, then re-validates. "
+        "Applies critical fixes + staged elicitation, then re-validates and "
+        "re-indexes RAG with the corrected discharge facts. "
         "Requires Primary MCP, Secondary MCP, and Mock EHR."
     )
 
@@ -568,22 +662,48 @@ def page_corrections(
             # Ensure critical widget values are on the case
             if "bill" in open_panels and working_case.get("bill"):
                 pass  # already set above
-            edited_meds = list(st.session_state.get("edited_meds") or [])
+            # Only overlay meds edited for THIS patient (never another case)
+            edited_meds = _meds_for_patient(pid, working_case, feedback)
             elicit_values = dict(st.session_state.get("elicitation_values") or {})
+            if st.session_state.get("elicitation_values_pid") != pid:
+                elicit_values = {}
+            # Re-run should use the form on this page even if Accept was not clicked
+            form_vals = {
+                k: v for k, v in (elicited or {}).items() if v not in ("", None)
+            }
+            if form_vals:
+                elicit_values = {**elicit_values, **form_vals}
             if working_case.get("follow_up_appointment"):
                 elicit_values.setdefault(
                     "follow_up_appointment", working_case["follow_up_appointment"]
                 )
+            if "followup" in open_panels and working_case.get("follow_up_appointment"):
+                elicit_values.setdefault(
+                    "follow_up_appointment", working_case["follow_up_appointment"]
+                )
+            if elicit_values:
+                stage_elicitation_response("accept", elicit_values)
+                st.session_state["elicitation_values"] = elicit_values
+                st.session_state["elicitation_values_pid"] = pid
+            else:
+                # Avoid silent auto-decline on Re-run when reviewer already cleared
+                # clinical blocks but left soft fields empty — still need Accept
+                # or values. Prefer decline only when nothing was staged.
+                pass
 
             async def _run():
                 status.write("Extract…")
                 ext = await run_extraction(pid)
                 if not isinstance(ext, dict):
                     ext = {}
+                # Prefer this patient's case meds when HITL table is empty
+                overlay_meds = edited_meds
+                if not overlay_meds:
+                    overlay_meds = list(working_case.get("medications") or [])
                 ext = _apply_overlays(
                     ext,
                     case=working_case,
-                    edited_meds=edited_meds,
+                    edited_meds=overlay_meds,
                     elicit_values=elicit_values,
                 )
                 status.write("Normalize…")
@@ -599,7 +719,7 @@ def page_corrections(
             norm, report = asyncio.run(_run())
             validation = bridge.normalize_validation(report) or {}
             case_out = bridge.case_from_normalization(norm)
-            # Keep reviewer edits on the working case
+            # Keep reviewer edits on the working case (this patient only)
             meds = [
                 m
                 for m in edited_meds
@@ -607,6 +727,7 @@ def page_corrections(
             ]
             if meds:
                 case_out["medications"] = meds
+                _store_edited_meds(pid, meds)
             if working_case.get("bill"):
                 case_out["bill"] = working_case["bill"]
             if working_case.get("follow_up_appointment") not in (None, ""):
@@ -617,11 +738,13 @@ def page_corrections(
                 case_out["discharge_ok"] = bool(working_case.get("discharge_ok"))
 
             st.session_state.summary = None
+            index_out = bridge.reindex_after_hitl(case_out)
+            indexed_ok = bool(index_out.get("indexed"))
             sync_pipeline_after_hitl(
                 case=case_out,
                 validation=validation,
                 summary=None,
-                indexed=True,
+                indexed=indexed_ok,
             )
             status.update(label="Validation complete", state="complete")
             remaining = critical_issues(list(validation.get("findings") or []))
@@ -631,6 +754,13 @@ def page_corrections(
                 f"blocked={validation.get('discharge_blocked')} "
                 f"critical_left={len(remaining)}"
             )
+            if indexed_ok:
+                st.caption(f"RAG re-indexed with Corrections · {index_out.get('indexed_chunks')}")
+            else:
+                st.warning(
+                    f"Validation updated but RAG re-index failed: {index_out.get('error')}. "
+                    "Use Ensure FAISS index on RAG Q&A."
+                )
             append_feedback(
                 {
                     "patient_id": pid,

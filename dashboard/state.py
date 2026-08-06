@@ -56,6 +56,12 @@ def ensure_session_defaults() -> None:
         "risk_override": "Keep model",
         "upload_results": None,
         "patient_query": "",
+        "edited_meds": None,
+        "edited_meds_pid": None,
+        "edited_meds_epoch": None,
+        "meds_editor_epoch": 0,
+        "elicitation_values": {},
+        "elicitation_values_pid": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:

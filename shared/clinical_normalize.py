@@ -19,24 +19,60 @@ from shared.settings import get_path
 
 # Local / EHR spelling variants → English/generic form used for matching (§12.3).
 # Keys are lowercase. Values keep a stable display casing.
+# Paracetamol (INN) and Acetaminophen (USAN) are the SAME drug — one shared form.
+# Prefer Paracetamol: matches NL/EU discharge notes and Mock EHR seed for P1022/P1024.
 MED_NAME_ALIASES: dict[str, str] = {
     "metformina": "Metformin",
+    "metformin": "Metformin",
     "atorvastatina": "Atorvastatin",
+    "atorvastatin": "Atorvastatin",
     "aspirina": "Aspirin",
+    "aspirin": "Aspirin",
     "amoxicilline": "Amoxicillin",
+    "amoxicilina": "Amoxicillin",
+    "amoxicillin": "Amoxicillin",
     "amoxicillin clavulanate": "Amoxicillin-Clavulanate",
     "amoxicillin-clavulanate": "Amoxicillin-Clavulanate",
-    "paracetamol": "Acetaminophen",
-    "acetaminophen": "Acetaminophen",
+    "amoxicilline-clavulanaat": "Amoxicillin-Clavulanate",
+    "ampicillin": "Ampicillin",
+    "ampicilline": "Ampicillin",
+    # Same drug — keep INN "Paracetamol" (not USAN Acetaminophen) as the project form
+    "paracetamol": "Paracetamol",
+    "acetaminophen": "Paracetamol",
+    "acetaminofen": "Paracetamol",
+    "acetaminophene": "Paracetamol",
+    "paracetemol": "Paracetamol",  # common misspelling
+    "panadol": "Paracetamol",
+    "tylenol": "Paracetamol",
     "acetylsalicylic acid": "Aspirin",
     "asa": "Aspirin",
+    "amlodpine": "Amlodipine",  # OCR / HITL typo seen in corpus
+    "amlodipina": "Amlodipine",
+    "amlodipine": "Amlodipine",
+    "lisinopril": "Lisinopril",
+    "loperamida": "Loperamide",
+    "loperamide": "Loperamide",
+    "warfarina": "Warfarin",
+    "warfarin": "Warfarin",
+    "sulfamethoxazole": "Sulfamethoxazole",
+    "sulfametoxazol": "Sulfamethoxazole",
 }
+
+# Strength / quantity glued onto a medicine name (e.g. "Paracetamol 500 mg").
+_DOSE_LIKE_REST = re.compile(
+    r"^("
+    r"[\d.,]+\s*(mg|mcg|µg|ug|g|ml|iu|units?|%|mg/kg)"
+    r"|[\d.,]+\s*-\s*[\d.,]+\s*(mg|mcg|µg|ug|g|ml)"
+    r")\b",
+    re.IGNORECASE,
+)
 
 # Field names that usually hold a medicine name
 _MED_NAME_KEYS = {
     "name",
     "medication",
     "medication_name",
+    "medicine_name",  # FA5 discharge / extractor field
     "drug",
     "drug_name",
     "medicine",
@@ -131,19 +167,32 @@ def expand_abbreviations_in_extraction(
 
 
 def canonicalize_med_name(name: str) -> str:
-    """Map one medicine spelling to the project canonical English form."""
+    """Map one medicine spelling to the project canonical English/INN form.
+
+    SSoT §12.3: Paracetamol and Acetaminophen must match after normalization
+    (same drug). Project form is Paracetamol so NL notes / P1022 EHR stay
+    consistent. Dose text stuck on the name ("Acetaminophen 500 mg") is
+    stripped so set reconciliation does not break.
+    """
     if not name or not str(name).strip():
         return name
     raw = str(name).strip()
     key = re.sub(r"\s+", " ", raw.lower())
-    if key in MED_NAME_ALIASES:
-        return MED_NAME_ALIASES[key]
-    # Soft match: leading token (e.g. "Amoxicilline 500 mg")
-    first = key.split(" ", 1)[0]
-    if first in MED_NAME_ALIASES:
-        rest = raw[len(first) :].lstrip()
-        canon = MED_NAME_ALIASES[first]
-        return f"{canon} {rest}".strip() if rest else canon
+
+    # Longest alias first (handles "amoxicillin clavulanate" before "amoxicillin")
+    for alias in sorted(MED_NAME_ALIASES.keys(), key=len, reverse=True):
+        if key == alias:
+            return MED_NAME_ALIASES[alias]
+        if key.startswith(alias + " "):
+            rest = key[len(alias) + 1 :].strip()
+            canon = MED_NAME_ALIASES[alias]
+            # Drop strength/quantity glued onto the name — identity only
+            if not rest or _DOSE_LIKE_REST.match(rest):
+                return canon
+            # Unknown modifier (e.g. "XR") — keep base drug for matching
+            if rest.upper() in {"XR", "ER", "SR", "CR", "HCL", "HCL.", "SODIUM"}:
+                return canon
+            return canon
     return raw
 
 

@@ -135,7 +135,11 @@ async def cross_validate(patient_id: str, extraction: dict) -> list[dict]:
             )
 
     # 2. med_omission_check (Warning) — EHR med not present at discharge.
+    # Skip when the omitted med conflicts with a documented allergy: withholding
+    # that drug on discharge is correct (HITL remove-flagged / Re-run), not an omission.
     for med_name in sorted(ehr_med_names - discharge_med_names):
+        if medication_conflicts_with_allergy(med_name, allergies):
+            continue
         findings.append(
             _finding(
                 "med_omission_check",

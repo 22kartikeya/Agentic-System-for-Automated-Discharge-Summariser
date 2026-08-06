@@ -185,6 +185,42 @@ PATIENTS: dict[str, dict] = {
         "primary_dx": ["J18.9"],
         "service_line": "General Medicine",
     },
+    # --- Synthetic E2E patients (edge-case canonicalization / allergy / reconcile) ---
+    # Discharge uses Paracetamol; EHR uses Acetaminophen — must reconcile (no false add/omit).
+    "P9991": {
+        "patient_id": "P9991", "patient_name": "Nova Reid",
+        "dob": "1988-01-10", "sex": "F",
+        "primary_dx": ["J06.9"],
+        "service_line": "General Medicine",
+    },
+    # Sulfa allergy vs Sulfamethoxazole on discharge — HARD allergy HITL.
+    "P9992": {
+        "patient_id": "P9992", "patient_name": "Omar Hassan",
+        "dob": "1975-06-02", "sex": "M",
+        "primary_dx": ["N39.0"],
+        "service_line": "General Medicine",
+    },
+    # Dose glued into medicine_name ("Paracetamol 500 mg") must still match EHR Acetaminophen.
+    "P9993": {
+        "patient_id": "P9993", "patient_name": "Elena Rossi",
+        "dob": "1991-11-19", "sex": "F",
+        "primary_dx": ["R50.9"],
+        "service_line": "General Medicine",
+    },
+    # Spanish spellings on discharge vs English EHR (Metformina/Aspirina).
+    "P9994": {
+        "patient_id": "P9994", "patient_name": "Lucia Fernandez",
+        "dob": "1960-05-25", "sex": "F",
+        "primary_dx": ["E11.9", "I10"],
+        "service_line": "General Medicine",
+    },
+    # Ampicillin vs Penicillin allergy — HARD HITL via conflict map.
+    "P9995": {
+        "patient_id": "P9995", "patient_name": "James Cole",
+        "dob": "1983-09-08", "sex": "M",
+        "primary_dx": ["J18.9"],
+        "service_line": "General Medicine",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -224,6 +260,11 @@ ALLERGIES: dict[str, list[str]] = {
     # *** Penicillin allergy contradicts the Amoxicilline on the Dutch
     #     discharge note -> ALLERGY CONTRADICTION (HARD HITL) ***
     "P1024": ["Penicillin"],
+    "P9991": [],
+    "P9992": ["Sulfa"],
+    "P9993": [],
+    "P9994": [],
+    "P9995": ["Penicillin"],
 }
 
 # ---------------------------------------------------------------------------
@@ -377,6 +418,26 @@ MED_ORDERS: dict[str, list[dict]] = {
         {"name": "Amoxicillin",  "dose": "500 mg", "frequency": "TID x 7 days"},
         {"name": "Paracetamol",  "dose": "500 mg", "frequency": "q6h PRN"},
     ],
+    # EHR uses Acetaminophen; discharge uses Paracetamol — must canonicalize to same.
+    "P9991": [
+        {"name": "Acetaminophen", "dose": "500 mg", "frequency": "q6h PRN"},
+        {"name": "Guaifenesin", "dose": "200 mg", "frequency": "TID"},
+    ],
+    "P9992": [
+        {"name": "Sulfamethoxazole", "dose": "800 mg", "frequency": "BID x 3 days"},
+        {"name": "Phenazopyridine", "dose": "100 mg", "frequency": "TID x 2 days"},
+    ],
+    "P9993": [
+        {"name": "Acetaminophen", "dose": "500 mg", "frequency": "q6h PRN"},
+    ],
+    "P9994": [
+        {"name": "Metformin", "dose": "500 mg", "frequency": "BID"},
+        {"name": "Aspirin", "dose": "81 mg", "frequency": "QD"},
+    ],
+    "P9995": [
+        {"name": "Ampicillin", "dose": "500 mg", "frequency": "QID x 7 days"},
+        {"name": "Acetaminophen", "dose": "500 mg", "frequency": "q6h PRN"},
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -467,6 +528,22 @@ LABS: dict[str, list[dict]] = {
         {"test": "CRP",        "value": "38 mg/L",      "abnormal": False, "action_in_ehr": ""},
         {"test": "Leukocytes", "value": "8.9 x10^9/L",  "abnormal": False, "action_in_ehr": ""},
     ],
+    "P9991": [
+        {"test": "WBC", "value": "7.2 x10^9/L", "abnormal": False, "action_in_ehr": ""},
+    ],
+    "P9992": [
+        {"test": "Urinalysis", "value": "positive leukocytes", "abnormal": True,
+         "action_in_ehr": "antibiotic course started"},
+    ],
+    "P9993": [
+        {"test": "CRP", "value": "4 mg/L", "abnormal": False, "action_in_ehr": ""},
+    ],
+    "P9994": [
+        {"test": "HbA1c", "value": "6.8 %", "abnormal": False, "action_in_ehr": ""},
+    ],
+    "P9995": [
+        {"test": "WBC", "value": "11.0 x10^9/L", "abnormal": False, "action_in_ehr": ""},
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -504,6 +581,11 @@ CARE_PLANS: dict[str, dict] = {
     # Follow-up is documented in the discharge note, so no followup_missing —
     # keeps the HITL drivers limited to allergy contradiction + missing data.
     "P1024": {"followup_required": True, "speciality": "PCP",            "window_days": 14},
+    "P9991": {"followup_required": True, "speciality": "PCP",            "window_days": 14},
+    "P9992": {"followup_required": True, "speciality": "PCP",            "window_days": 14},
+    "P9993": {"followup_required": True, "speciality": "PCP",            "window_days": 7},
+    "P9994": {"followup_required": True, "speciality": "Endocrinology",  "window_days": 30},
+    "P9995": {"followup_required": True, "speciality": "PCP",            "window_days": 14},
 }
 
 # ---------------------------------------------------------------------------

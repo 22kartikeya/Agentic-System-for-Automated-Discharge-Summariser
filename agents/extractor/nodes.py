@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError
 
 from agents.extractor.state import ExtractorState
+from shared.clinical_normalize import canonicalize_med_name
 from shared.logger import get_logger
 from shared.models.extraction import (
     BillExtraction,
@@ -345,7 +346,9 @@ async def _extract_meds_rescue(llm, raw_text: str) -> _MedsOnly:
     system = (
         "Extract medications, allergies, follow_up_appointment, and "
         "discharge_approved from this clinical discharge note. "
-        "Copy EVERY prescription table row into medications with medicine_name. "
+        "Copy EVERY prescription table row into medications with "
+        "medicine_name, strength, dosage, frequency, route, period, "
+        "remarks, and total_quantity when present. "
         "Reply with ONLY JSON."
     )
     return await _extract_json_force(llm, _MedsOnly, system, raw_text)
@@ -380,24 +383,497 @@ def _pick_text_for_extract(harvest: dict, resource_text: str) -> str:
 
 
 def _source_looks_like_it_has_meds(raw_text: str) -> bool:
-    """Heuristic: source likely lists discharge medications (any language)."""
+    """Heuristic: source likely lists discharge medications (any language / any drug)."""
     text = (raw_text or "").lower()
     markers = (
-        "amoxicill",
-        "metformin",
-        "paracetamol",
-        "lisinopril",
-        "atorvastatin",
         "medication",
         "medications",
         "prescription",
+        "prescriptions",
+        "medicine_name",
         "recept",
+        "recepten",
         "geneesmiddel",
         "ontslagrecept",
-        "medicine_name",
+        "medicamento",
+        "medicamentos",
+        "receta",
+        "recetas",
+        "medikament",
+        "verordnung",
         "sterkte",
+        "dosage",
+        "dosering",
+        " | ",  # pipe tables used in sample OCR + many exports
     )
-    return any(m in text for m in markers)
+    if any(m in text for m in markers):
+        return True
+    # Dose-like tokens often appear in med tables even without headers
+    return bool(re.search(r"\b\d+\s*mg\b", text, flags=re.IGNORECASE))
+
+
+def _meds_from_structured(data: object) -> list[PrescriptionItem]:
+    """Copy medications from structured JSON intake (any patient schema variant)."""
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("medications") or data.get("prescriptions") or data.get("meds") or []
+    if not isinstance(raw, list):
+        return []
+    out: list[PrescriptionItem] = []
+    for i, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            continue
+        name = (
+            item.get("medicine_name")
+            or item.get("name")
+            or item.get("medication")
+            or item.get("drug")
+            or item.get("geneesmiddel")
+            or ""
+        )
+        name = str(name).strip()
+        if not name:
+            continue
+        try:
+            out.append(
+                PrescriptionItem(
+                    sl_no=item.get("sl_no") if item.get("sl_no") is not None else i,
+                    medicine_name=name,
+                    strength=item.get("strength") or item.get("dose") or item.get("sterkte"),
+                    dosage=item.get("dosage") or item.get("dosering"),
+                    frequency=item.get("frequency") or item.get("frequentie"),
+                    route=item.get("route") or item.get("toedieningsweg"),
+                    period=item.get("period") or item.get("duur") or item.get("duration"),
+                    remarks=item.get("remarks") or item.get("opmerkingen"),
+                    total_quantity=(
+                        str(item["total_quantity"])
+                        if item.get("total_quantity") is not None
+                        else (
+                            str(item["totale_hoeveelheid"])
+                            if item.get("totale_hoeveelheid") is not None
+                            else None
+                        )
+                    ),
+                )
+            )
+        except Exception:
+            continue
+    return out
+
+
+def _parse_prescription_table(raw_text: str) -> list[PrescriptionItem]:
+    """Deterministic parse of pipe-separated prescription tables (any language).
+
+    Used to fill empty meds OR enrich incomplete LLM rows (name-only) from the
+    source table — keeps one extraction path reliable for new OCR/txt intakes.
+    """
+    lines = (raw_text or "").splitlines()
+    rows: list[PrescriptionItem] = []
+    header_idx = -1
+    for i, line in enumerate(lines):
+        low = line.lower()
+        if "|" not in line:
+            continue
+        if any(
+            h in low
+            for h in (
+                "medicine",
+                "geneesmiddel",
+                "medicamento",
+                "medikament",
+                "drug",
+                "sterkte",
+                "strength",
+            )
+        ):
+            header_idx = i
+            break
+    # If no header, still try numbered pipe rows (1 | Drug | 500 mg | ...)
+    body = lines[header_idx + 1 :] if header_idx >= 0 else lines
+    for line in body:
+        if "|" not in line:
+            # Stop after leaving a table block when we already have rows
+            if rows and not line.strip():
+                break
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        parts = [p for p in parts if p != ""]
+        if len(parts) < 2:
+            continue
+        # Skip repeated header-ish rows
+        joined = " ".join(parts).lower()
+        if any(h in joined for h in ("geneesmiddel", "medicine name", "sterkte", "strength", "nr.")):
+            continue
+        # Row forms: [sl, name, strength, dosage, freq, route, period, ...]
+        # or [name, strength, ...]
+        sl_no = None
+        name = ""
+        rest: list[str] = []
+        if parts[0].isdigit() or (parts[0].endswith(".") and parts[0][:-1].isdigit()):
+            try:
+                sl_no = int(parts[0].rstrip("."))
+            except ValueError:
+                sl_no = None
+            name = parts[1] if len(parts) > 1 else ""
+            rest = parts[2:]
+        else:
+            name = parts[0]
+            rest = parts[1:]
+        name = name.strip()
+        if not name or len(name) < 2:
+            continue
+        # Avoid capturing section titles as drugs
+        if name.lower() in {"ontslagrecepten", "discharge prescriptions", "medications", "allergieën"}:
+            continue
+        strength = rest[0] if len(rest) > 0 else None
+        dosage = rest[1] if len(rest) > 1 else None
+        frequency = rest[2] if len(rest) > 2 else None
+        route = rest[3] if len(rest) > 3 else None
+        period = rest[4] if len(rest) > 4 else None
+        remarks = rest[5] if len(rest) > 5 else None
+        total_quantity = rest[6] if len(rest) > 6 else None
+        try:
+            rows.append(
+                PrescriptionItem(
+                    sl_no=sl_no or (len(rows) + 1),
+                    medicine_name=name,
+                    strength=strength,
+                    dosage=dosage,
+                    frequency=frequency,
+                    route=route,
+                    period=period,
+                    remarks=remarks,
+                    total_quantity=total_quantity,
+                )
+            )
+        except Exception:
+            continue
+    return rows
+
+
+def _prescription_incomplete(med: PrescriptionItem) -> bool:
+    """True when a blocking prescription field is blank (FA5 Table 3)."""
+    for field in ("medicine_name", "strength", "frequency", "route"):
+        val = getattr(med, field, None)
+        if val is None or not str(val).strip():
+            return True
+    return False
+
+
+def _merge_med_row(base: PrescriptionItem, donor: PrescriptionItem) -> PrescriptionItem:
+    """Copy blank fields on base from donor (table / JSON). Keep LLM name if set."""
+    data = base.model_dump()
+    for key, val in donor.model_dump().items():
+        if key == "medicine_name":
+            if not str(data.get("medicine_name") or "").strip() and val:
+                data[key] = val
+            continue
+        if key == "sl_no":
+            if data.get("sl_no") is None and val is not None:
+                data[key] = val
+            continue
+        if not str(data.get(key) or "").strip() and val not in (None, ""):
+            data[key] = val
+    return PrescriptionItem(**data)
+
+
+def _merge_medication_lists(
+    llm_meds: list[PrescriptionItem],
+    source_meds: list[PrescriptionItem],
+) -> list[PrescriptionItem]:
+    """Enrich LLM meds with table/JSON details; add any source rows the LLM dropped."""
+    if not source_meds:
+        return list(llm_meds)
+    if not llm_meds:
+        return list(source_meds)
+
+    by_canon: dict[str, PrescriptionItem] = {}
+    for m in source_meds:
+        key = canonicalize_med_name(m.medicine_name).strip().lower()
+        if key:
+            by_canon[key] = m
+
+    used: set[str] = set()
+    out: list[PrescriptionItem] = []
+    for i, med in enumerate(llm_meds):
+        key = canonicalize_med_name(med.medicine_name).strip().lower()
+        donor = by_canon.get(key)
+        if donor is None and _prescription_incomplete(med) and i < len(source_meds):
+            # Same-index fallback when spellings diverge oddly
+            donor = source_meds[i]
+            key = canonicalize_med_name(donor.medicine_name).strip().lower()
+        if donor is not None:
+            med = _merge_med_row(med, donor)
+            if key:
+                used.add(key)
+        out.append(med)
+
+    out_keys = {
+        canonicalize_med_name(m.medicine_name).strip().lower()
+        for m in out
+        if m.medicine_name
+    }
+    for m in source_meds:
+        key = canonicalize_med_name(m.medicine_name).strip().lower()
+        if key and key not in used and key not in out_keys:
+            out.append(m)
+            out_keys.add(key)
+    return out
+
+
+def _ensure_discharge_meds(
+    result: DischargeExtraction,
+    *,
+    raw_text: str,
+    structured: object,
+) -> DischargeExtraction:
+    """Fill empty meds, or enrich incomplete LLM rows, from JSON / pipe table.
+
+    The LLM often returns medicine_name only (drops strength/frequency/route).
+    Previously we skipped the table parse whenever any meds existed — that caused
+    false incomplete_prescription_fields for notes that clearly have full rows.
+    """
+    from_json = _meds_from_structured(structured)
+    parsed = _parse_prescription_table(raw_text)
+    # Prefer structured JSON when present; still merge pipe-table details into it.
+    source = _merge_medication_lists(from_json, parsed) if from_json else parsed
+
+    if not result.medications:
+        if source:
+            logger.info("Filled %s med(s) from structured intake / table parse", len(source))
+            result.medications = source
+        return result
+
+    needs_enrich = any(_prescription_incomplete(m) for m in result.medications) or (
+        bool(source) and len(source) > len(result.medications)
+    )
+    if source and needs_enrich:
+        merged = _merge_medication_lists(list(result.medications), source)
+        logger.info(
+            "Enriched discharge meds from source (%s → %s row(s))",
+            len(result.medications),
+            len(merged),
+        )
+        result.medications = merged
+    return result
+
+
+_DX_SECTION_HEADERS = (
+    "ontslagdiagnose",
+    "discharge diagnosis",
+    "discharge diagnoses",
+    "primary diagnosis",
+    "diagnoses",
+    "diagnosis",
+)
+
+_DX_SECTION_STOP = (
+    "allergie",
+    "allergy",
+    "ontslagrecept",
+    "prescription",
+    "medication",
+    "medicamento",
+    "vervolg",
+    "follow-up",
+    "follow up",
+    "ontslaginstruct",
+    "discharge instruction",
+    "einde van document",
+    "end of document",
+)
+
+_INSTRUCTIONS_HEADERS = (
+    "ontslaginstructies",
+    "discharge instructions",
+    "instructions",
+)
+
+_INSTRUCTIONS_STOP = (
+    "einde van document",
+    "end of document",
+    "follow-up",
+    "follow up",
+    "vervolg",
+    "allergie",
+    "prescription",
+)
+
+
+def _parse_diagnosis_section(raw_text: str) -> list[str]:
+    """Pull diagnosis lines under a common discharge-note heading (any language)."""
+    lines = (raw_text or "").splitlines()
+    start = -1
+    for i, line in enumerate(lines):
+        low = line.strip().lower().strip(":").strip("-").strip()
+        if not low or set(low) <= {"-", "=", "_"}:
+            continue
+        if any(low == h or low.startswith(h + " ") for h in _DX_SECTION_HEADERS):
+            start = i + 1
+            break
+    if start < 0:
+        return []
+
+    out: list[str] = []
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped:
+            if out:
+                break
+            continue
+        if set(stripped) <= {"-", "=", "_"}:
+            if out:
+                break
+            continue
+        low = stripped.lower()
+        if any(s in low for s in _DX_SECTION_STOP):
+            break
+        cleaned = re.sub(r"^\d+[\.)]\s*", "", stripped).strip()
+        if cleaned and len(cleaned) > 2:
+            out.append(cleaned)
+    return out
+
+
+def _ensure_discharge_diagnosis(
+    result: DischargeExtraction, *, raw_text: str
+) -> DischargeExtraction:
+    """Fill discharge_diagnosis from the note when the LLM left it empty."""
+    if result.discharge_diagnosis:
+        return result
+    dx = _parse_diagnosis_section(raw_text)
+    if dx:
+        logger.info("Filled discharge_diagnosis from source section (%s)", len(dx))
+        result.discharge_diagnosis = dx
+    return result
+
+
+def _parse_section_bullets(
+    raw_text: str, *, headers: tuple[str, ...], stops: tuple[str, ...]
+) -> list[str]:
+    """Collect bullet/line content under a heading until the next section."""
+    lines = (raw_text or "").splitlines()
+    start = -1
+    for i, line in enumerate(lines):
+        low = line.strip().lower().strip(":").strip("-").strip()
+        if not low or set(low) <= {"-", "=", "_"}:
+            continue
+        if any(low == h or low.startswith(h + " ") for h in headers):
+            start = i + 1
+            break
+    if start < 0:
+        return []
+    out: list[str] = []
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped:
+            if out:
+                break
+            continue
+        if set(stripped) <= {"-", "=", "_"}:
+            if out:
+                break
+            continue
+        low = stripped.lower()
+        if any(s in low for s in stops):
+            break
+        cleaned = re.sub(r"^[-*•]\s*", "", stripped).strip()
+        cleaned = re.sub(r"^\d+[\.)]\s*", "", cleaned).strip()
+        if cleaned and len(cleaned) > 2:
+            out.append(cleaned)
+    return out
+
+
+def _ensure_discharge_instructions(
+    result: DischargeExtraction, *, raw_text: str
+) -> DischargeExtraction:
+    """Fill discharge_instructions from the note when the LLM left it empty."""
+    if result.discharge_instructions and str(result.discharge_instructions).strip():
+        return result
+    bullets = _parse_section_bullets(
+        raw_text, headers=_INSTRUCTIONS_HEADERS, stops=_INSTRUCTIONS_STOP
+    )
+    if bullets:
+        text = " ".join(bullets)
+        logger.info("Filled discharge_instructions from source section")
+        result.discharge_instructions = text
+    return result
+
+
+# Label → discharge field (NL + EN headers common in FA5 sample notes).
+_LABELED_FIELD_ALIASES: list[tuple[tuple[str, ...], str]] = [
+    (("afdeling", "ward", "unit", "station"), "ward"),
+    (("bed no", "bed_no", "bed number", "bed"), "bed_no"),
+    (("age", "leeftijd"), "age"),
+    (("address", "adres"), "address"),
+    (("gender", "sex", "geslacht"), "gender"),
+    (("admission date", "opnamedatum", "date of admission"), "admission_date"),
+    (("discharge date", "ontslagdatum", "date of discharge"), "discharge_date"),
+    (
+        ("attending physician", "attending", "behandelend arts", "behandelaar"),
+        "attending_physician",
+    ),
+    (("patient name", "naam", "name"), "patient_name"),
+]
+
+
+def _parse_labeled_demographics(raw_text: str) -> dict[str, object]:
+    """Pull simple 'Label: value' demographics from the note (any patient)."""
+    found: dict[str, object] = {}
+    for line in (raw_text or "").splitlines():
+        if ":" not in line:
+            continue
+        left, _, right = line.partition(":")
+        key = re.sub(r"\s+", " ", left.strip().lower())
+        val = right.strip()
+        if not key or not val:
+            continue
+        for aliases, field in _LABELED_FIELD_ALIASES:
+            if field in found:
+                continue
+            if any(key == a or key.startswith(a) for a in aliases):
+                if field == "age":
+                    m = re.search(r"\d+", val)
+                    if m:
+                        found[field] = int(m.group(0))
+                else:
+                    found[field] = val
+                break
+    return found
+
+
+def _ensure_discharge_demographics(
+    result: DischargeExtraction, *, raw_text: str
+) -> DischargeExtraction:
+    """Fill blank ward/bed/gender/dates/etc. from labeled lines in the source."""
+    found = _parse_labeled_demographics(raw_text)
+    if not found:
+        return result
+    filled: list[str] = []
+    for field, value in found.items():
+        current = getattr(result, field, None)
+        empty = current is None or (isinstance(current, str) and not str(current).strip())
+        if empty:
+            setattr(result, field, value)
+            filled.append(field)
+    if filled:
+        logger.info("Filled demographics from labeled lines: %s", ", ".join(filled))
+    return result
+
+
+def _enrich_discharge_from_source(
+    result: DischargeExtraction,
+    *,
+    raw_text: str,
+    structured: object,
+) -> DischargeExtraction:
+    """One post-LLM pass: meds + diagnosis + instructions + demographics."""
+    result = _ensure_discharge_meds(
+        result, raw_text=raw_text, structured=structured
+    )
+    result = _ensure_discharge_diagnosis(result, raw_text=raw_text)
+    result = _ensure_discharge_instructions(result, raw_text=raw_text)
+    result = _ensure_discharge_demographics(result, raw_text=raw_text)
+    return result
 
 
 def _infer_discharge_approved(raw_text: str, current: bool | None) -> bool | None:
@@ -485,8 +961,10 @@ async def extract_node(state: ExtractorState) -> dict:
             "and copy line_items with description/qty/unit_price/total. "
             "If the source has a prescription / medication table (any language), "
             "extract EVERY row into medications with medicine_name, strength, "
-            "dosage, frequency, route, period, remarks, total_quantity. "
-            "Also extract allergies and follow-up appointment text when present. "
+            "dosage, frequency, route, period, remarks, total_quantity — "
+            "never leave strength/frequency/route blank when the table has them. "
+            "Also extract discharge_diagnosis, allergies and follow-up "
+            "appointment text when present. "
             "Detect the source language and report it in the 'language' field. "
             "For discharge docs, fill BOTH naming styles when possible: "
             "attending_physician/consulting_doctors/allergies/follow_up_appointment "
@@ -546,9 +1024,28 @@ async def extract_node(state: ExtractorState) -> dict:
                         logger.warning(
                             "Meds rescue failed for %s: %s", patient_id, rescue_exc
                         )
+            # Always enrich meds + diagnosis from source when LLM dropped fields
+            if isinstance(result, DischargeExtraction):
+                result = _enrich_discharge_from_source(
+                    result,
+                    raw_text=raw_text,
+                    structured=harvest.get("structured_data"),
+                )
         except Exception as exc:
             logger.error("LLM extraction failed for %s/%s: %s", patient_id, doc_type, exc)
             errors.append(f"{doc_type}: LLM extraction failed ({exc})")
+            # Still try deterministic parse so new OCR/txt intakes are not blank
+            if doc_type == "discharge":
+                parsed = _enrich_discharge_from_source(
+                    DischargeExtraction(patient_id=patient_id),
+                    raw_text=raw_text,
+                    structured=harvest.get("structured_data"),
+                )
+                if parsed.medications or parsed.discharge_diagnosis:
+                    parsed.discharge_approved = _infer_discharge_approved(
+                        raw_text, parsed.discharge_approved
+                    )
+                    extraction.discharge = fill_fa5_and_rules_aliases(parsed)
             continue
 
         if doc_type == "discharge" and isinstance(result, DischargeExtraction):

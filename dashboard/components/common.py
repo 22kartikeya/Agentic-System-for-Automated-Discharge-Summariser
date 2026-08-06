@@ -210,11 +210,32 @@ def save_feedback(patient_id: str, payload: dict) -> Path:
     path = feedback_path(patient_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = load_feedback(patient_id)
+    # Elicitation-only saves must not keep stale med drafts after a fresh Process.
+    if "medications" not in payload and existing.get("meds_stale"):
+        existing.pop("medications", None)
     existing.update(payload)
+    if "medications" in payload:
+        existing["meds_stale"] = False
     existing["patient_id"] = sanitize_patient_id(patient_id)
     existing["updated_at"] = datetime.now(timezone.utc).isoformat()
     path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def clear_feedback_medications(patient_id: str, *, pipeline_trace_id: str | None = None) -> None:
+    """Drop med drafts so disk cannot outrank a fresh Process extract."""
+    existing = load_feedback(patient_id)
+    if not existing:
+        return
+    existing.pop("medications", None)
+    existing["meds_stale"] = True
+    existing["patient_id"] = sanitize_patient_id(patient_id)
+    if pipeline_trace_id:
+        existing["pipeline_trace_id"] = pipeline_trace_id
+    existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path = feedback_path(patient_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def completeness_score(report: dict | None) -> tuple[int, str]:
