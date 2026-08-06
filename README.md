@@ -86,8 +86,9 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 ### Phases 4–5 — Extract + Normalize
 
 - **Extractor** — harvest text via MCP, then **LLM** (Bedrock) fills structured fields for every doc (JSON / txt / PDF / OCR). PDFs via PyPDF2; set `TESSERACT_ENABLED=true` for image OCR when no `.ocr.txt` sidecar.
+- **JSON intake** — when a file has both a narrative `raw_text` and structured keys (e.g. P1021 Hindi discharge), the Harvester returns the narrative **plus** a `--- structured fields ---` dump so age/ward/dates are not hidden from the LLM. After extraction, blank discharge fields are filled from `structured_data` (same idea as bill merge). Planted nulls (`address`, `follow_up_appointment`) stay empty so validation still HITLs them.
 - **Normalizer** — MCP **Sampling** via Medical Lang Bridge. The LLM runs in the client `sampling_callback` (LiteLLM), not inside the MCP server.
-- **Languages** — primary set from `rules.yaml`: `en`, `es`, `hi`, `de`, `fr`, `nl`. Unexpected languages use a fallback path (still translate). Post-pass: abbrev expand, med canonicalize (§12.3), ICD-10.
+- **Languages** — primary set from `rules.yaml`: `en`, `es`, `hi`, `de`, `fr`, `nl`. Unexpected languages use a fallback path (still translate). Post-pass: abbrev expand, med canonicalize (§12.3; Paracetamol is the project canonical form), ICD-10.
 - Normalizer A2A can ask Extractor over A2A when no extraction JSON is embedded — start Extractor (`:8100`) for that path.
 
 ### Phases 6–8 — Validate + risk

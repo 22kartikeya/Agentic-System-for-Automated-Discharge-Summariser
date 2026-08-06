@@ -860,19 +860,104 @@ def _ensure_discharge_demographics(
     return result
 
 
+def _is_blank(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, (list, dict)) and not value:
+        return True
+    return False
+
+
+def _merge_discharge_from_structured(
+    result: DischargeExtraction,
+    structured: object,
+) -> DischargeExtraction:
+    """Fill blank discharge fields from harvest structured_data (JSON intake).
+
+    Same idea as ``_merge_bill_from_structured``: LLM first, then copy real
+    values from the parsed JSON when the model left a field empty. Never invent
+    data for keys that are null/absent in the source (P1021 address / follow-up).
+    """
+    if not isinstance(structured, dict):
+        return result
+
+    filled: list[str] = []
+
+    def _take(field: str, *keys: str) -> None:
+        current = getattr(result, field, None)
+        if not _is_blank(current):
+            return
+        for key in keys:
+            if key not in structured:
+                continue
+            val = structured.get(key)
+            if _is_blank(val):
+                continue
+            setattr(result, field, val)
+            filled.append(field)
+            return
+
+    _take("patient_id", "patient_id")
+    _take("patient_name", "patient_name", "name")
+    _take("age", "age")
+    _take("gender", "gender", "sex")
+    _take("address", "address")
+    _take("admission_date", "admission_date")
+    _take("discharge_date", "discharge_date")
+    _take("ward", "ward")
+    _take("bed_no", "bed_no", "bed")
+    _take("attending_physician", "attending_physician", "attending")
+    _take("consulting_doctors", "consulting_doctors")
+    _take("discharge_diagnosis", "discharge_diagnosis")
+    _take("allergies", "allergies", "adr_allergy_info")
+    _take("follow_up_appointment", "follow_up_appointment", "follow_up_appointments")
+    _take("discharge_instructions", "discharge_instructions")
+
+    # discharge_ok (sample JSON) → discharge_approved (FA5 / rules)
+    if result.discharge_approved is None:
+        for key in ("discharge_approved", "discharge_ok"):
+            if key not in structured:
+                continue
+            val = structured.get(key)
+            if val is None:
+                continue
+            if isinstance(val, str) and not val.strip():
+                continue
+            result.discharge_approved = bool(val)
+            filled.append("discharge_approved")
+            break
+
+    # Meds already handled by _ensure_discharge_meds; fill only if still empty
+    if _is_blank(result.medications):
+        from_json = _meds_from_structured(structured)
+        if from_json:
+            result.medications = from_json
+            filled.append("medications")
+
+    if filled:
+        logger.info(
+            "Merged discharge fields from structured JSON: %s",
+            ", ".join(dict.fromkeys(filled)),
+        )
+    return result
+
+
 def _enrich_discharge_from_source(
     result: DischargeExtraction,
     *,
     raw_text: str,
     structured: object,
 ) -> DischargeExtraction:
-    """One post-LLM pass: meds + diagnosis + instructions + demographics."""
+    """One post-LLM pass: meds + diagnosis + instructions + demographics + JSON merge."""
     result = _ensure_discharge_meds(
         result, raw_text=raw_text, structured=structured
     )
     result = _ensure_discharge_diagnosis(result, raw_text=raw_text)
     result = _ensure_discharge_instructions(result, raw_text=raw_text)
     result = _ensure_discharge_demographics(result, raw_text=raw_text)
+    result = _merge_discharge_from_structured(result, structured)
     return result
 
 

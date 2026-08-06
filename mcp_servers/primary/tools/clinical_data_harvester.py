@@ -34,6 +34,23 @@ _DOC_TYPE_PATH_KEYS = {
 
 _BINARY_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg"}
 
+_STRUCTURED_FIELDS_MARKER = "--- structured fields ---"
+
+
+def json_harvest_raw_text(data: dict) -> str:
+    """Build LLM text from a JSON intake: narrative and/or full structured keys.
+
+    If an embedded ``raw_text`` exists, keep it and append the other JSON fields
+    so demographics (age/ward/…) are not hidden from the Extractor. Planted
+    nulls stay in the dump as null — validation must still surface them.
+    """
+    narrative = data.get("raw_text")
+    if isinstance(narrative, str) and narrative.strip():
+        fields_only = {k: v for k, v in data.items() if k != "raw_text"}
+        dump = json.dumps(fields_only, ensure_ascii=False, indent=2)
+        return f"{narrative.strip()}\n\n{_STRUCTURED_FIELDS_MARKER}\n{dump}"
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
 
 async def _harvest_one(patient_id: str, doc_type: str) -> dict:
     """Locate and read one file for patient_id/doc_type. Returns a plain dict."""
@@ -89,8 +106,8 @@ async def _harvest_one(patient_id: str, doc_type: str) -> dict:
             result["error"] = f"invalid JSON: {exc}"
             return result
         result["structured_data"] = data
-        # Prefer an embedded raw_text field when present; else dump JSON as text
-        result["raw_text"] = data.get("raw_text") or json.dumps(data, ensure_ascii=False, indent=2)
+        # Narrative (if any) plus structured keys — never hide JSON fields from LLM
+        result["raw_text"] = json_harvest_raw_text(data)
         return result
 
     if is_binary:
