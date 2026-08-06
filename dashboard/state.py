@@ -55,6 +55,7 @@ def ensure_session_defaults() -> None:
         "approval_note": "",
         "risk_override": "Keep model",
         "upload_results": None,
+        "upload_pipeline": None,
         "patient_query": "",
         "edited_meds": None,
         "edited_meds_pid": None,

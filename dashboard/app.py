@@ -336,7 +336,8 @@ def page_upload() -> None:
         '<div class="upload-page">'
         '<div class="upload-page-title">Upload New Patients</div>'
         '<p class="upload-page-lede">'
-        "Add discharge, lab, and bill documents for a new or existing patient."
+        "Add discharge, lab, and bill documents for a new or existing patient. "
+        "All three are required — after upload the same Process pipeline runs."
         "</p></div>",
         unsafe_allow_html=True,
     )
@@ -420,18 +421,25 @@ def page_upload() -> None:
             unsafe_allow_html=True,
         )
 
-        has_files = any(f is not None for f in (discharge_up, lab_up, bill_up))
+        all_three = all(f is not None for f in (discharge_up, lab_up, bill_up))
+        if not all_three:
+            st.warning(
+                "Upload all three documents (discharge report, lab report, and "
+                "hospital bill) to proceed."
+            )
+
         st.markdown('<div class="upload-cta-mark"></div>', unsafe_allow_html=True)
         clicked = st.button(
             "Upload Documents",
             type="primary",
             key="save_uploads",
-            disabled=not has_files,
+            disabled=not all_three,
             use_container_width=True,
         )
 
         if clicked:
             results: list[dict[str, Any]] = []
+            pipeline_out: dict[str, Any] | None = None
             try:
                 pid = sanitize_patient_id(up_pid)
             except Exception as exc:
@@ -445,7 +453,15 @@ def page_upload() -> None:
                         "patient_id": up_pid,
                     }
                 ]
+                st.session_state.upload_pipeline = None
                 st.error(f"Invalid patient ID — {exc}")
+                pid = ""
+
+            if pid and not all_three:
+                st.warning(
+                    "Upload all three documents (discharge report, lab report, and "
+                    "hospital bill) to proceed."
+                )
                 pid = ""
 
             if pid:
@@ -482,9 +498,24 @@ def page_upload() -> None:
                                 }
                             )
                 st.session_state.upload_results = results
+                ok_kinds = {r["kind"] for r in results if r.get("ok")}
+                full_ok = ok_kinds >= {"discharge", "lab", "bill"} and not any(
+                    not r.get("ok") for r in results
+                )
                 if any(r["ok"] for r in results):
                     st.session_state.patient_id = pid
                     _clear_case_state()
+                if full_ok:
+                    with st.spinner("Running Process pipeline…"):
+                        try:
+                            pipeline_out = bridge.run_host_pipeline(pid)
+                            _sync_from_pipeline(pipeline_out)
+                        except Exception as exc:  # noqa: BLE001
+                            pipeline_out = {"error": str(exc), "patient_id": pid}
+                            st.session_state.last_error = str(exc)
+                    st.session_state.upload_pipeline = pipeline_out
+                else:
+                    st.session_state.upload_pipeline = None
                 st.rerun()
 
     results = st.session_state.get("upload_results")
@@ -512,9 +543,19 @@ def page_upload() -> None:
             "</div></div>",
             unsafe_allow_html=True,
         )
+        pipe = st.session_state.get("upload_pipeline")
+        if isinstance(pipe, dict):
+            if pipe.get("error"):
+                st.error(f"Pipeline error — {pipe['error']}")
+            else:
+                st.success(
+                    f"Process complete · status={pipe.get('status')} · "
+                    f"indexed={pipe.get('indexed')}"
+                )
     elif ok_rows and fail_rows:
         st.warning(
-            f"Partial upload — {len(ok_rows)} succeeded, {len(fail_rows)} failed."
+            f"Partial upload — {len(ok_rows)} succeeded, {len(fail_rows)} failed. "
+            "Upload all three documents to proceed with Process."
         )
         for r in fail_rows:
             label = _kinds.get(str(r.get("kind")), r.get("kind") or "Document")
@@ -536,8 +577,13 @@ def page_upload() -> None:
                 )
 
 
-
 def page_documents() -> None:
+    from dashboard.components.ingest import (
+        all_intake_present,
+        intake_doc_coverage,
+        missing_intake_labels,
+    )
+
     _page_header(
         "Document Viewer",
         "Browse intake files for the selected patient, then run the pipeline.",
@@ -548,27 +594,43 @@ def page_documents() -> None:
         return
 
     files = _list_files()
+    coverage = intake_doc_coverage(st.session_state.patient_id)
+    missing = missing_intake_labels(coverage)
+    ready = all_intake_present(coverage)
 
     st.caption("Pipeline always reads live intake under `data/input/` for this patient.")
-    if st.button("Process patient", type="primary"):
-        progress = st.progress(0, text="Starting pipeline…")
-        with st.spinner("Running pipeline…"):
-            try:
-                progress.progress(15, text="Monitor → Extract → Normalize…")
-                out = bridge.run_host_pipeline(st.session_state.patient_id)
-                progress.progress(85, text="Gate → Summary…")
-                _sync_from_pipeline(out)
-                progress.progress(100, text="Done")
-                if out.get("error"):
-                    st.error(out["error"])
-                else:
-                    st.success(
-                        f"Done · status={out.get('status')} · indexed={out.get('indexed')}"
-                    )
-                    st.rerun()
-            except Exception as exc:  # noqa: BLE001
-                st.session_state.last_error = str(exc)
-                st.error(str(exc))
+    if missing:
+        st.warning(
+            "Upload all three documents (discharge report, lab report, and "
+            "hospital bill) to proceed. "
+            f"Missing: {', '.join(missing)}."
+        )
+
+    if st.button("Process patient", type="primary", disabled=not ready):
+        if not ready:
+            st.warning(
+                "Upload all three documents (discharge report, lab report, and "
+                "hospital bill) to proceed."
+            )
+        else:
+            progress = st.progress(0, text="Starting pipeline…")
+            with st.spinner("Running pipeline…"):
+                try:
+                    progress.progress(15, text="Monitor → Extract → Normalize…")
+                    out = bridge.run_host_pipeline(st.session_state.patient_id)
+                    progress.progress(85, text="Gate → Summary…")
+                    _sync_from_pipeline(out)
+                    progress.progress(100, text="Done")
+                    if out.get("error"):
+                        st.error(out["error"])
+                    else:
+                        st.success(
+                            f"Done · status={out.get('status')} · indexed={out.get('indexed')}"
+                        )
+                        st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.session_state.last_error = str(exc)
+                    st.error(str(exc))
 
     st.caption(f"{len(files)} file(s) under Roots for {st.session_state.patient_id}")
     if not files:

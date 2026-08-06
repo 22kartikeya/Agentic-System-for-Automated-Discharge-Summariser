@@ -119,6 +119,7 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 - Single app (`dashboard/app.py`) on `:8501` — five clinical pages (Document Viewer, Validation Report, Corrections, RAG Q&A, Discharge Summary) plus **Upload new patients**.
 - Sidebar **live patient search** (ID or name) over files under `data/input/` — no hard-coded sample list.
 - **Process patient** runs extract → normalize → validate in-process (MCP + Bedrock); pages degrade when backends are offline.
+- **Upload** requires discharge + lab + bill; after a full upload the dashboard runs the same Process pipeline. Process is blocked until all three intake types exist on disk.
 - Corrections: `st.data_editor`, elicitation accept/decline/cancel, approval, re-run (re-indexes RAG with elicited fields); feedback under `data/hitl/`.
 
 ### Phase 12 — Host

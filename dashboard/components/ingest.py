@@ -17,6 +17,21 @@ _DOC_FOLDERS = {
     "bill": ("input_bills", "bills"),
 }
 
+_COVERAGE_KEYS = ("discharge", "lab", "bill")
+
+_LABELS = {
+    "discharge": "discharge report",
+    "lab": "lab report",
+    "bill": "hospital bill",
+}
+
+# list_patient_files folder name → coverage key
+_FOLDER_TO_KIND = {
+    "doctor_reports": "discharge",
+    "lab_reports": "lab",
+    "bills": "bill",
+}
+
 
 def _folder_for(doc_kind: str) -> Path:
     path_key, fallback = _DOC_FOLDERS[doc_kind]
@@ -54,3 +69,31 @@ def save_upload(patient_id: str, doc_kind: str, original_name: str, data: bytes)
     dest = folder / filename
     dest.write_bytes(data)
     return dest
+
+
+def intake_doc_coverage(patient_id: str) -> dict[str, bool]:
+    """True when at least one intake file exists for discharge / lab / bill."""
+    from dashboard.components.common import list_patient_files
+
+    try:
+        pid = sanitize_patient_id(patient_id)
+    except Exception:
+        return {k: False for k in _COVERAGE_KEYS}
+
+    files = list_patient_files(pid)
+    coverage = {k: False for k in _COVERAGE_KEYS}
+    for folder, kind in _FOLDER_TO_KIND.items():
+        coverage[kind] = bool(files.get(folder))
+    return coverage
+
+
+def missing_intake_labels(coverage: dict[str, bool] | None) -> list[str]:
+    """Human labels for missing discharge / lab / bill kinds."""
+    cov = coverage or {}
+    return [_LABELS[k] for k in _COVERAGE_KEYS if not cov.get(k)]
+
+
+def all_intake_present(coverage: dict[str, bool] | None) -> bool:
+    """True when discharge, lab, and bill are all present."""
+    cov = coverage or {}
+    return all(cov.get(k) for k in _COVERAGE_KEYS)
