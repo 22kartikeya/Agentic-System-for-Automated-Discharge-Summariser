@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 
 from agno.agent import Agent
+from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.tools.mcp import MultiMCPTools
 from fastmcp import Client
@@ -112,12 +113,43 @@ def _session_db() -> SqliteDb:
     return SqliteDb(db_file=db_file, session_table=table)
 
 
+def session_has_history(session_id: str | None) -> bool:
+    """True when SqliteDb already has at least one prior run for this session."""
+    if not session_id:
+        return False
+    try:
+        db = _session_db()
+        sess = db.get_session(session_id=session_id, session_type=SessionType.AGENT)
+        runs = getattr(sess, "runs", None) if sess is not None else None
+        return bool(runs)
+    except Exception as exc:
+        logger.info("session_has_history check failed (%s)", exc)
+        return False
+
+
 def _build_context_block(chunks: list[dict]) -> str:
     parts: list[str] = []
     for i, chunk in enumerate(chunks, start=1):
         source = chunk.get("source_path") or chunk.get("doc_type") or "unknown"
         parts.append(f"[chunk {i} | {source}]\n{chunk.get('text', '').strip()}")
     return "\n\n".join(parts)
+
+
+def _history_instructions(refuse: str) -> str:
+    return (
+        "Clinical facts: use the retrieved patient-record context in the user "
+        "message when it is present. "
+        "Conversation: the last few chat turns are in history — use them when "
+        "the question is about a prior question/answer, or to resolve references "
+        "like 'that', 'it', 'previous', or 'last'. "
+        "Do not invent clinical facts that are not in the retrieved context or "
+        "clearly stated in recent chat history. "
+        "Do not call MCP tools for this question — answer directly. "
+        "Context may be English, Spanish, Hindi, German, French, or Dutch; "
+        "answer from context/history even when the question language differs. "
+        f"If neither history nor patient-record context supports the answer, "
+        f"respond exactly:\n{refuse}"
+    )
 
 
 async def run_generation(
@@ -129,13 +161,10 @@ async def run_generation(
 ) -> str:
     """Generate a grounded answer with Agno + MultiMCPTools + SqliteDb + arun.
 
-    If chunks are empty, return the exact refusal string immediately (no invent).
+    Empty chunks still call arun so last-3 session history can answer follow-ups.
     """
     refuse = refusal_text()
-    if not chunks:
-        return refuse
-
-    context = _build_context_block(chunks)
+    context = _build_context_block(chunks) if chunks else ""
     prompt_instructions = await fetch_rag_answer_prompt(context_length=len(context))
 
     multi_mcp = await _connect_multi_mcp()
@@ -145,17 +174,12 @@ async def run_generation(
         name="generation_agent",
         model=get_agno_model(),
         description=(
-            "Generates grounded clinical answers from retrieved patient-record context."
+            "Generates grounded clinical answers from retrieved patient-record "
+            "context and recent chat history."
         ),
         instructions=[
             prompt_instructions,
-            (
-                "Use ONLY the patient-record context provided in the user message. "
-                "Do not call MCP tools for this question — answer directly. "
-                "Context may be English, Spanish, Hindi, German, French, or Dutch; "
-                "answer from that context even when the question language differs. "
-                f"If the answer is not in that context, respond exactly:\n{refuse}"
-            ),
+            _history_instructions(refuse),
         ],
         tools=[multi_mcp],
         db=_session_db(),
@@ -164,12 +188,22 @@ async def run_generation(
         markdown=False,
     )
 
-    user_message = (
-        f"Patient ID: {patient_id}\n"
-        f"Question: {question}\n\n"
-        f"Retrieved patient-record context:\n{context}\n\n"
-        "Answer the question using only the context above."
-    )
+    if context:
+        user_message = (
+            f"Patient ID: {patient_id}\n"
+            f"Question: {question}\n\n"
+            f"Retrieved patient-record context:\n{context}\n\n"
+            "Answer using patient-record context for clinical facts. "
+            "Use chat history for prior Q&A and reference resolution."
+        )
+    else:
+        user_message = (
+            f"Patient ID: {patient_id}\n"
+            f"Question: {question}\n\n"
+            "No new patient-record context was retrieved for this question. "
+            "Answer only from recent chat history if the question is about a "
+            "prior turn or can be resolved from it; otherwise refuse exactly."
+        )
 
     try:
         response = await agent.arun(user_message, session_id=session_id)
@@ -191,5 +225,5 @@ generation_agent = Agent(
     name="generation_agent",
     model=get_agno_model(),
     description="Grounded RAG Generation Agent (MultiMCPTools + SqliteDb + arun).",
-    instructions="Answer clinical questions using retrieved patient-record context only.",
+    instructions="Answer clinical questions using retrieved patient-record context and recent chat history.",
 )

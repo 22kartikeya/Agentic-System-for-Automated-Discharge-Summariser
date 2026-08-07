@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 
 from rag.augmentation_agent import run_augmentation
-from rag.generation_agent import refusal_text, run_generation
+from rag.generation_agent import refusal_text, run_generation, session_has_history
 from rag.indexing_agent import run_indexing
 from rag.reflection_agent import run_reflection
 from rag.retrieval_agent import run_retrieval
@@ -94,17 +94,49 @@ async def ask(
     # 3) Augment (keyword re-rank)
     chunks = await run_augmentation(question, chunks)
 
-    # Out of context → exact refusal (no LLM invent)
-    if not _context_is_useful(chunks):
-        logger.info("No useful context for %s — refusing", patient_id)
+    useful = _context_is_useful(chunks)
+
+    # No useful retrieval: still generate when SqliteDb has prior turns so
+    # follow-ups about the last 3 Q&A can be answered from session history.
+    if not useful:
+        if not session_has_history(session_id):
+            logger.info("No useful context for %s — refusing", patient_id)
+            return {
+                "patient_id": patient_id,
+                "session_id": session_id,
+                "answer": refuse,
+                "refused": True,
+                "sources": [],
+                "triad": {},
+                "notes": notes + ["no_useful_context"],
+            }
+        logger.info(
+            "No useful context for %s — trying session history", patient_id
+        )
+        answer = await run_generation(
+            patient_id=patient_id,
+            question=question,
+            chunks=chunks or [],
+            session_id=session_id,
+        )
+        if not answer.strip() or answer.strip() == refuse:
+            return {
+                "patient_id": patient_id,
+                "session_id": session_id,
+                "answer": refuse,
+                "refused": True,
+                "sources": _sources(chunks),
+                "triad": {},
+                "notes": notes + ["no_useful_context", "history_miss"],
+            }
         return {
             "patient_id": patient_id,
             "session_id": session_id,
-            "answer": refuse,
-            "refused": True,
-            "sources": [],
+            "answer": answer,
+            "refused": False,
+            "sources": _sources(chunks),
             "triad": {},
-            "notes": notes + ["no_useful_context"],
+            "notes": notes + ["answered_from_history"],
         }
 
     # 4) Generate (+ one regenerate on Triad/hallucination failure)

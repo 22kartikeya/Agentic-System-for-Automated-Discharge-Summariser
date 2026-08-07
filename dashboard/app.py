@@ -71,6 +71,7 @@ def _clear_case_state() -> None:
     st.session_state.validation = None
     st.session_state.summary = None
     st.session_state.rag_history = []
+    st.session_state.rag_session_id = None
     st.session_state.doc_count = None
     st.session_state.last_error = None
     # HITL med/elicitation edits are per-patient — never carry across switches
@@ -710,6 +711,77 @@ def page_validation() -> None:
                     f'<code class="artifact-uri">{_esc(uri)}</code></div>',
                     unsafe_allow_html=True,
                 )
+
+    # Risk heatmap (Secondary MCP generate_risk_heatmap, local fallback)
+    from dashboard.components.analytics import load_heatmap
+    import pandas as pd
+
+    heatmap, heat_src = load_heatmap(findings)
+    totals = heatmap.get("totals") or {}
+    cells = heatmap.get("cells") or {}
+
+    st.markdown(
+        '<div class="section-label">Risk heatmap (findings by severity)</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Groups this patient’s validation findings by severity "
+        "(critical / warning / info). Bars = number of findings in each bucket. "
+        "Rows = the rules that fired (weight feeds the risk score; blocking can "
+        "stop discharge)."
+    )
+    st.caption(f"Source · {heat_src}")
+
+    all_rows = [row for items in cells.values() for row in (items or [])]
+    blocking_n = sum(1 for r in all_rows if r.get("blocking"))
+    total_weight = sum(int(r.get("weight") or 0) for r in all_rows)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Findings", len(all_rows))
+    m2.metric("Blocking", blocking_n)
+    m3.metric("Total weight", total_weight)
+
+    preferred = ["critical", "warning", "info"]
+    order = [s for s in preferred if s in (totals or cells)] + [
+        s for s in (totals or cells) if s not in preferred
+    ]
+
+    if totals:
+        chart_df = pd.DataFrame(
+            {
+                "Severity": [s.title() for s in order if s in totals],
+                "Finding count": [int(totals[s]) for s in order if s in totals],
+            }
+        ).set_index("Severity")
+        st.bar_chart(chart_df)
+
+    if cells:
+        for severity in order:
+            if severity not in cells:
+                continue
+            items = cells.get(severity) or []
+            with st.expander(
+                f"{str(severity).title()} · {len(items)} finding"
+                f"{'' if len(items) == 1 else 's'}",
+                expanded=str(severity).lower() == "critical",
+            ):
+                if items:
+                    table = pd.DataFrame(
+                        [
+                            {
+                                "Rule": r.get("rule_id") or "—",
+                                "Message": r.get("message") or "—",
+                                "Field": r.get("field") or "—",
+                                "Weight": r.get("weight", 0),
+                                "Blocking": bool(r.get("blocking")),
+                            }
+                            for r in items
+                        ]
+                    )
+                    st.dataframe(table, width="stretch", hide_index=True)
+                else:
+                    st.write("None")
+    else:
+        st.caption("No findings to plot.")
 
     st.markdown('<div class="section-label">Findings</div>', unsafe_allow_html=True)
     score = (val.get("risk") or {}).get("score")

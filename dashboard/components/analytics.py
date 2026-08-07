@@ -57,6 +57,17 @@ async def try_secondary_heatmap(findings: list[dict]) -> tuple[dict, str]:
     return heatmap_from_findings(findings), "local"
 
 
+def load_heatmap(findings: list[dict]) -> tuple[dict, str]:
+    """Sync wrapper for Streamlit: Secondary MCP heatmap with local fallback."""
+    import asyncio
+
+    try:
+        return asyncio.run(try_secondary_heatmap(findings or []))
+    except Exception as exc:
+        logger.info("Heatmap load failed (%s) — using local builder", exc)
+        return heatmap_from_findings(findings or []), "local"
+
+
 async def try_secondary_benchmarks(service_line: str) -> tuple[dict, str]:
     """Call Secondary MCP get_population_benchmarks; fall back locally."""
     try:

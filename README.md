@@ -111,7 +111,7 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 - Five Agno agents on `:8105`: Indexing → Retrieval → Augmentation → Generation → Reflection.
 - FAISS per `patient_id` under `data/vector_db/{patient_id}/`; MiniLM embeddings.
 - Generation uses MCP `rag-answer-prompt`, `MultiMCPTools`, SqliteDb (`num_history_runs=3`).
-- Out-of-context → exact refusal from `agent_config.yaml`. RAG Triad gated by `rules.yaml` thresholds.
+- Last 3 Q&A turns stay in session memory; follow-ups about recent chat use that history. Clinical facts still come from retrieved records; otherwise exact refusal from `agent_config.yaml`. RAG Triad gated by `rules.yaml` thresholds.
 - After Corrections **Re-run**, FAISS rebuilds from HITL-reviewed discharge facts **including accepted elicitation fields** (e.g. attending physician).
 
 ### Phase 11 — HITL Streamlit
@@ -120,6 +120,7 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 - Sidebar **live patient search** (ID or name) over files under `data/input/` — no hard-coded sample list.
 - **Process patient** runs extract → normalize → validate in-process (MCP + Bedrock); pages degrade when backends are offline.
 - **Upload** requires discharge + lab + bill; after a full upload the dashboard runs the same Process pipeline. Process is blocked until all three intake types exist on disk.
+- **Validation Report** shows a findings-by-severity risk heatmap (counts + rule/message table) via Secondary MCP, with a local fallback if `:8201` is offline.
 - Corrections: `st.data_editor`, elicitation accept/decline/cancel, approval, re-run (re-indexes RAG with elicited fields); feedback under `data/hitl/`.
 
 ### Phase 12 — Host

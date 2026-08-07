@@ -16,10 +16,13 @@ def build_heatmap(findings: list[dict]) -> dict:
     """Group findings by severity for a simple heatmap view."""
     grid: dict[str, list[dict]] = defaultdict(list)
     for finding in findings:
-        severity = finding.get("severity", "info")
+        raw = finding.get("severity") or "info"
+        severity = str(raw).strip().lower() or "info"
         grid[severity].append(
             {
                 "rule_id": finding.get("rule_id"),
+                "message": finding.get("message") or "",
+                "field": finding.get("field") or "",
                 "weight": finding.get("weight", 0),
                 "blocking": finding.get("blocking", False),
             }
