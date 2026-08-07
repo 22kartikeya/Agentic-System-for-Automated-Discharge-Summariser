@@ -61,17 +61,45 @@ def _tool_result_to_dict(result: object) -> dict:
 
 async def completeness_node(state: ValidatorState) -> dict:
     """Rules Engine completeness check + ONE elicitation when needed (SSoT §3.7)."""
+    import time
+
+    from shared.tracing.langfuse import observation, record_mcp_tool
+
     url = _primary_mcp_url()
     errors = list(state.get("errors", []))
     extraction = state.get("extraction") or {}
+    params = {"patient_id": state["patient_id"], "extraction": extraction}
 
+    with observation(
+        "Prompt",
+        kind="prompt",
+        input_payload={"tool": "clinical_rules_engine"},
+        metadata={"agent": "Validator Agent"},
+    ) as pspan:
+        pspan.set_output({"ok": True})
+
+    t0 = time.perf_counter()
     async with Client(url, elicitation_handler=resolve_elicitation_handler) as client:
         result = await client.call_tool(
             "clinical_rules_engine",
-            {"patient_id": state["patient_id"], "extraction": extraction},
+            params,
             raise_on_error=False,
         )
+    elapsed = (time.perf_counter() - t0) * 1000
     payload = _tool_result_to_dict(result)
+    record_mcp_tool(
+        "clinical_rules_engine",
+        params={"patient_id": state["patient_id"]},
+        result={
+            "findings": len(payload.get("completeness_findings") or []),
+            "missing_fields": payload.get("missing_fields"),
+            "elicitation_outcome": payload.get("elicitation_outcome"),
+            "error": payload.get("error"),
+        },
+        duration_ms=elapsed,
+        success=not bool(payload.get("error")),
+        error=str(payload.get("error") or "") or None,
+    )
     if payload.get("error"):
         errors.append(str(payload["error"]))
 
@@ -93,17 +121,34 @@ async def completeness_node(state: ValidatorState) -> dict:
 
 async def ehr_node(state: ValidatorState) -> dict:
     """EHR cross-validation (7 Table 4 rules) against Mock EHR."""
+    import time
+
+    from shared.tracing.langfuse import record_mcp_tool
+
     url = _primary_mcp_url()
     errors = list(state.get("errors", []))
     extraction = state.get("extraction") or {}
 
+    t0 = time.perf_counter()
     async with Client(url) as client:
         result = await client.call_tool(
             "ehr_validation",
             {"patient_id": state["patient_id"], "extraction": extraction},
             raise_on_error=False,
         )
+    elapsed = (time.perf_counter() - t0) * 1000
     payload = _tool_result_to_dict(result)
+    record_mcp_tool(
+        "ehr_validation",
+        params={"patient_id": state["patient_id"]},
+        result={
+            "findings": len(payload.get("ehr_findings") or payload.get("findings") or []),
+            "error": payload.get("error"),
+        },
+        duration_ms=elapsed,
+        success=not bool(payload.get("error")),
+        error=str(payload.get("error") or "") or None,
+    )
     if payload.get("error"):
         errors.append(str(payload["error"]))
 
@@ -154,6 +199,10 @@ def _quality_finding(normalization: dict, rules: dict) -> dict | None:
 
 async def risk_node(state: ValidatorState) -> dict:
     """Aggregate risk score via Secondary MCP; hold Primary open too (SSoT §3.1)."""
+    import time
+
+    from shared.tracing.langfuse import observation, record_guardrail, record_mcp_tool
+
     primary_url = _primary_mcp_url()
     secondary_url = _secondary_mcp_url()
     errors = list(state.get("errors", []))
@@ -168,8 +217,16 @@ async def risk_node(state: ValidatorState) -> dict:
     quality_finding = _quality_finding(state.get("normalization") or {}, rules)
     if quality_finding:
         all_findings.append(quality_finding)
+        record_guardrail(
+            "translation_confidence",
+            result="below_threshold",
+            blocked=True,
+            detail=quality_finding.get("message") or "",
+            reason="low_translation_confidence",
+        )
 
     # Dual MCP: Primary + Secondary open together while scoring (SSoT §3.1).
+    t0 = time.perf_counter()
     async with Client(primary_url) as primary, Client(secondary_url) as secondary:
         # Touch Primary rules resource so both servers are actively used.
         try:
@@ -181,7 +238,20 @@ async def risk_node(state: ValidatorState) -> dict:
             {"findings": all_findings},
             raise_on_error=False,
         )
+    elapsed = (time.perf_counter() - t0) * 1000
     payload = _tool_result_to_dict(result)
+    record_mcp_tool(
+        "calculate_risk_score",
+        params={"findings_count": len(all_findings)},
+        result={
+            "risk_tier": payload.get("risk_tier"),
+            "score": payload.get("score") or payload.get("risk_score"),
+            "error": payload.get("error"),
+        },
+        duration_ms=elapsed,
+        success=not bool(payload.get("error")),
+        error=str(payload.get("error") or "") or None,
+    )
     if payload.get("error"):
         errors.append(str(payload["error"]))
 
@@ -191,6 +261,20 @@ async def risk_node(state: ValidatorState) -> dict:
     risk_tier = payload.get("risk_tier", "low")
     if discharge_blocked or payload.get("triggered_hard_guardrails"):
         risk_tier = "high"
+
+    with observation(
+        "Output",
+        kind="span",
+        input_payload={"findings": len(all_findings)},
+        metadata={"agent": "Validator Agent"},
+    ) as out:
+        out.set_output(
+            {
+                "risk_tier": risk_tier,
+                "discharge_blocked": discharge_blocked,
+                "score": payload.get("score") or payload.get("risk_score"),
+            }
+        )
 
     gate = evaluate_hitl_escalation(risk_tier, discharge_blocked)
 
@@ -214,27 +298,46 @@ async def risk_node(state: ValidatorState) -> dict:
 
 async def report_node(state: ValidatorState) -> dict:
     """Persist the JSON+HTML audit report (SSoT §5.5) — runs unconditionally."""
+    import time
+
+    from shared.tracing.langfuse import record_mcp_tool
+
     url = _primary_mcp_url()
     errors = list(state.get("errors", []))
     normalization = state.get("normalization") or {}
+    params = {
+        "patient_id": state["patient_id"],
+        "normalized_extraction": state.get("extraction") or {},
+        "findings": state.get("all_findings", []),
+        "risk_score": state.get("risk_score", 0),
+        "risk_tier": state.get("risk_tier", "low"),
+        "discharge_blocked": state.get("discharge_blocked", False),
+        "translation_confidence": normalization.get("translation_confidence", 0.0),
+        "elicitation_outcome": state.get("elicitation_outcome"),
+        "release_gate": state.get("release_gate") or {},
+    }
 
+    t0 = time.perf_counter()
     async with Client(url) as client:
         result = await client.call_tool(
             "clinical_insight_reporter",
-            {
-                "patient_id": state["patient_id"],
-                "normalized_extraction": state.get("extraction") or {},
-                "findings": state.get("all_findings", []),
-                "risk_score": state.get("risk_score", 0),
-                "risk_tier": state.get("risk_tier", "low"),
-                "discharge_blocked": state.get("discharge_blocked", False),
-                "translation_confidence": normalization.get("translation_confidence", 0.0),
-                "elicitation_outcome": state.get("elicitation_outcome"),
-                "release_gate": state.get("release_gate") or {},
-            },
+            params,
             raise_on_error=False,
         )
+    elapsed = (time.perf_counter() - t0) * 1000
     report = _tool_result_to_dict(result)
+    record_mcp_tool(
+        "clinical_insight_reporter",
+        params={"patient_id": state["patient_id"], "risk_tier": state.get("risk_tier")},
+        result={
+            "recommendation": report.get("recommendation"),
+            "discharge_blocked": report.get("discharge_blocked"),
+            "error": report.get("error"),
+        },
+        duration_ms=elapsed,
+        success=not bool(report.get("error")),
+        error=str(report.get("error") or "") or None,
+    )
     if report.get("error"):
         errors.append(str(report["error"]))
 

@@ -26,13 +26,26 @@ def evaluate_hitl_escalation(
     else:
         action = "auto_approve"
 
-    return {
+    result = {
         "risk_level": level,
         "discharge_blocked": blocked,
         "mandatory_hitl": mandatory,
         "auto_approve_allowed": action == "auto_approve",
         "action": action,
     }
+    try:
+        from shared.tracing.langfuse import record_guardrail
+
+        record_guardrail(
+            "HITL Escalation",
+            result=action,
+            blocked=mandatory,
+            detail=f"risk={level} blocked={blocked}",
+            reason=action,
+        )
+    except Exception:
+        pass
+    return result
 
 
 def is_auto_approve_allowed(risk_level: str | None, discharge_blocked: bool) -> bool:

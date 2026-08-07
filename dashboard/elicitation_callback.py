@@ -111,14 +111,30 @@ async def streamlit_elicitation_handler(message, response_type, params, context)
     staged = _staged_response
     _staged_response = None  # one-shot
 
+    action = "decline"
+    payload: dict[str, Any] | None = None
     if staged is None:
         logger.info("No staged HITL response — declining elicitation")
-        return ElicitResult(action="decline")
+        action = "decline"
+    else:
+        action = staged.get("action", "decline")
+        if action == "accept":
+            payload = _accept_payload(response_type, staged.get("data") or {}, fields)
+            logger.info("Accepting elicitation with fields=%s", list(payload.keys()))
 
-    action = staged.get("action", "decline")
-    if action == "accept":
-        payload = _accept_payload(response_type, staged.get("data") or {}, fields)
-        logger.info("Accepting elicitation with fields=%s", list(payload.keys()))
+    try:
+        from shared.tracing.langfuse import record_elicitation
+
+        record_elicitation(
+            schema={"message": str(message or ""), "fields": fields},
+            reviewer_response=payload if action == "accept" else staged,
+            action=action,
+            metadata={"agent": "Validator Agent"},
+        )
+    except Exception as exc:
+        logger.info("Elicitation trace skipped: %s", exc)
+
+    if action == "accept" and payload is not None:
         # FastMCP server reads ``content`` (not ``data``) — data= leaves content=None
         # and crashes clinical_rules_engine with ValidationError(input_value=None).
         return ElicitResult(action="accept", content=payload)

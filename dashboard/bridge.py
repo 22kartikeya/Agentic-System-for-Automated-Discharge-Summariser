@@ -404,84 +404,188 @@ async def _local_pipeline(patient_id: str) -> dict[str, Any]:
     from agents.summary.agent import run_summary
     from agents.validator.graph import run_validation
     from rag.indexing_agent import run_indexing
+    from shared.tracing.langfuse import case_trace, observation, record_error
 
-    tid = str(uuid4())
-    stages: list[str] = ["monitor"]
-    try:
-        from agents.monitor.agent import discover_clinical_intake
+    stages: list[str] = []
+    with case_trace(patient_id) as tid:
+        # Host Agent children (project / SSoT agent names)
+        with observation(
+            "Monitor Agent",
+            kind="agent",
+            input_payload={"patient_id": patient_id},
+            metadata={"agent": "Discharge Monitor Agent"},
+        ) as mon:
+            with observation(
+                "scan_patients",
+                kind="span",
+                input_payload={"patient_id": patient_id},
+            ) as scan:
+                stages.append("monitor")
+                try:
+                    from agents.monitor.agent import discover_clinical_intake
 
-        await discover_clinical_intake()
-    except Exception:
-        pass
+                    found = await discover_clinical_intake()
+                    scan.set_output({"discovered": True, "detail": str(found)[:500]})
+                    mon.set_output({"scan_patients": "ok", "chars": len(str(found or ""))})
+                except Exception as exc:
+                    scan.set_output({"discovered": False, "error": str(exc)})
+                    mon.set_output({"scan_patients": "error", "error": str(exc)})
+                    record_error("scan_patients", exc, fallback="continue_pipeline")
 
-    ext = await run_extraction(patient_id)
-    stages.append("extract")
-    norm = await run_normalization(patient_id, ext)
-    stages.append("normalize")
-    report = await run_validation(patient_id, norm)
-    stages.append("validate")
-    validation = normalize_validation(report) or {}
-    case = case_from_normalization(norm)
+        with observation(
+            "Extractor Agent",
+            kind="agent",
+            input_payload={"patient_id": patient_id},
+        ) as ext_span:
+            ext = await run_extraction(patient_id)
+            ext_span.set_output(
+                {
+                    "patient_id": patient_id,
+                    "keys": list(ext.keys()) if isinstance(ext, dict) else type(ext).__name__,
+                }
+            )
+        stages.append("extract")
 
-    indexed = False
-    try:
-        await run_indexing(patient_id)
-        indexed = True
-        stages.append("index")
-    except Exception as exc:
-        return {
+        with observation(
+            "Normalizer Agent",
+            kind="agent",
+            input_payload={"patient_id": patient_id},
+        ) as norm_span:
+            norm = await run_normalization(patient_id, ext)
+            norm_span.set_output(
+                {
+                    "translation_confidence": (norm or {}).get("translation_confidence"),
+                    "source_language": (norm or {}).get("source_language"),
+                }
+            )
+        stages.append("normalize")
+
+        with observation(
+            "Validator Agent",
+            kind="agent",
+            input_payload={"patient_id": patient_id},
+        ) as val_span:
+            report = await run_validation(patient_id, norm)
+            val_span.set_output(
+                {
+                    "risk_level": (report or {}).get("risk_level"),
+                    "discharge_blocked": (report or {}).get("discharge_blocked"),
+                    "recommendation": (report or {}).get("recommendation"),
+                }
+            )
+        stages.append("validate")
+        validation = normalize_validation(report) or {}
+        case = case_from_normalization(norm)
+
+        indexed = False
+        try:
+            await run_indexing(patient_id)
+            indexed = True
+            stages.append("index")
+        except Exception as exc:
+            record_error("FAISS indexing", exc, fallback="partial_return")
+            return {
+                "trace_id": tid,
+                "patient_id": patient_id,
+                "case": case,
+                "validation": validation,
+                "summary": None,
+                "stages_run": stages,
+                "indexed": False,
+                "needs_hitl": bool(validation.get("needs_hitl")),
+                "discharge_blocked": bool(validation.get("discharge_blocked")),
+                "gate": {
+                    "allow_summary": not bool(validation.get("needs_hitl")),
+                    "reason": f"index_error: {exc}",
+                },
+                "error": f"index_error: {exc}",
+                "status": "partial",
+            }
+
+        stages.append("gate")
+        blocked = bool(validation.get("discharge_blocked"))
+        needs = bool(validation.get("needs_hitl"))
+        allow = not (blocked or needs)
+        summary = None
+        with observation(
+            "Final Discharge Summary",
+            kind="agent",
+            input_payload={
+                "patient_id": patient_id,
+                "allow": allow,
+                "agent": "Summary Agent",
+            },
+        ) as sum_span:
+            if allow:
+                stages.append("summary_or_hitl")
+                summ = await run_summary(
+                    patient_id=patient_id,
+                    risk_level=str((validation.get("risk") or {}).get("level") or "low"),
+                    discharge_blocked=False,
+                    extraction=norm.get("normalized_extraction") or {},
+                    audience="patient",
+                )
+                summary = _normalize_summary(summ)
+                from shared.tracing.langfuse import observation as _obs
+
+                with _obs(
+                    "Final Summary",
+                    kind="span",
+                    input_payload={"patient_id": patient_id},
+                ) as final_sum:
+                    final_sum.set_output(
+                        {
+                            "sections": list((summary or {}).get("sections") or [])
+                            if isinstance(summary, dict)
+                            else None,
+                            "section_count": len((summary or {}).get("sections") or [])
+                            if isinstance(summary, dict)
+                            else 0,
+                        }
+                    )
+                sum_span.set_output(
+                    {
+                        "generated": True,
+                        "sections": len((summary or {}).get("sections") or [])
+                        if isinstance(summary, dict)
+                        else 0,
+                    }
+                )
+            else:
+                stages.append("summary_or_hitl")
+                sum_span.set_output({"generated": False, "skipped": True, "reason": "release_gate"})
+
+        result = {
             "trace_id": tid,
             "patient_id": patient_id,
             "case": case,
             "validation": validation,
-            "summary": None,
+            "summary": summary,
             "stages_run": stages,
-            "indexed": False,
-            "needs_hitl": bool(validation.get("needs_hitl")),
-            "discharge_blocked": bool(validation.get("discharge_blocked")),
+            "indexed": indexed,
+            "needs_hitl": needs,
+            "discharge_blocked": blocked,
             "gate": {
-                "allow_summary": not bool(validation.get("needs_hitl")),
-                "reason": f"index_error: {exc}",
+                "allow_summary": allow,
+                "reason": None if allow else "mandatory_hitl_or_blocked",
             },
-            "error": f"index_error: {exc}",
-            "status": "partial",
+            "status": "ok",
         }
-
-    stages.append("gate")
-    blocked = bool(validation.get("discharge_blocked"))
-    needs = bool(validation.get("needs_hitl"))
-    allow = not (blocked or needs)
-    summary = None
-    if allow:
-        stages.append("summary_or_hitl")
-        summ = await run_summary(
-            patient_id=patient_id,
-            risk_level=str((validation.get("risk") or {}).get("level") or "low"),
-            discharge_blocked=False,
-            extraction=norm.get("normalized_extraction") or {},
-            audience="patient",
-        )
-        summary = _normalize_summary(summ)
-    else:
-        # Host may list the stage even when withheld — UI must show skipped
-        stages.append("summary_or_hitl")
-
-    return {
-        "trace_id": tid,
-        "patient_id": patient_id,
-        "case": case,
-        "validation": validation,
-        "summary": summary,
-        "stages_run": stages,
-        "indexed": indexed,
-        "needs_hitl": needs,
-        "discharge_blocked": blocked,
-        "gate": {
-            "allow_summary": allow,
-            "reason": None if allow else "mandatory_hitl_or_blocked",
-        },
-        "status": "ok",
-    }
+        with observation(
+            "Workflow Output",
+            kind="span",
+            input_payload={"patient_id": patient_id},
+        ) as wf:
+            wf.set_output(
+                {
+                    "trace_id": tid,
+                    "stages_run": stages,
+                    "needs_hitl": needs,
+                    "discharge_blocked": blocked,
+                    "status": "ok",
+                }
+            )
+        return result
 
 
 def run_host_pipeline(patient_id: str, *, use_fixture: bool = True) -> dict[str, Any]:

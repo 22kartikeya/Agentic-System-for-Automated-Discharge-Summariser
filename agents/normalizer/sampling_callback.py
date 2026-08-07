@@ -58,6 +58,22 @@ async def sampling_callback(messages, params, context) -> CreateMessageResult:
         temperature=float(temperature),
     )
 
+    try:
+        from shared.tracing.langfuse import record_sampling
+
+        prefs = getattr(params, "modelPreferences", None)
+        record_sampling(
+            server_preferences={
+                "hints": hints,
+                "raw": str(prefs)[:500] if prefs is not None else None,
+            },
+            client_model=model_used,
+            translation_result={"chars": len(text), "preview": text[:400]},
+            metadata={"agent": "Normalizer Agent"},
+        )
+    except Exception as exc:
+        logger.info("Sampling trace skipped: %s", exc)
+
     return CreateMessageResult(
         role="assistant",
         model=model_used,

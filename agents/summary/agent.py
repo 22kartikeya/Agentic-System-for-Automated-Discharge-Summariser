@@ -88,13 +88,43 @@ def _prompt_text(get_prompt_result: Any) -> str:
 
 async def fetch_summary_prompt(risk_level: str, audience: str) -> str:
     """MCP get_prompt('summary-generation-prompt') — never hardcode (§3.4)."""
+    from shared.tracing.langfuse import observation
+
     url = _primary_mcp_url()
-    async with Client(url) as client:
-        result = await client.get_prompt(
-            "summary-generation-prompt",
-            {"risk_level": risk_level, "audience": audience},
+    with observation(
+        "MCP Prompt",
+        kind="prompt",
+        input_payload={
+            "name": "summary-generation-prompt",
+            "parameters": {"risk_level": risk_level, "audience": audience},
+            "server": "Primary MCP Server",
+        },
+        metadata={"agent": "Summary Agent"},
+    ) as prompt_span:
+        with observation(
+            "Primary MCP Server",
+            kind="span",
+            input_payload={"url": url, "primitive": "get_prompt"},
+        ) as mcp_span:
+            async with Client(url) as client:
+                result = await client.get_prompt(
+                    "summary-generation-prompt",
+                    {"risk_level": risk_level, "audience": audience},
+                )
+            text = _prompt_text(result)
+            mcp_span.set_output(
+                {
+                    "prompt_name": "summary-generation-prompt",
+                    "chars": len(text),
+                    "ok": bool(text),
+                }
+            )
+        prompt_span.set_output(
+            {
+                "prompt_name": "summary-generation-prompt",
+                "chars": len(text),
+            }
         )
-    text = _prompt_text(result)
     if not text:
         raise RuntimeError("summary-generation-prompt returned empty text from MCP")
     return text

@@ -82,89 +82,111 @@ async def run_case_pipeline(patient_id: str) -> str:
     if not pid.startswith("P") or not pid[1:].isdigit():
         return json.dumps({"error": "patient_id must look like P001 or P1019"})
 
-    from shared.tracing.langfuse import flush, start_case_trace
+    from shared.tracing.langfuse import case_trace, flush, observation, record_error
 
-    tid = start_case_trace(pid)
-    client = get_host_client()
-    await client.discover()
-    log: list[dict[str, Any]] = [{"trace_id": tid}]
+    with case_trace(pid) as tid:
+        client = get_host_client()
+        await client.discover()
+        log: list[dict[str, Any]] = [{"trace_id": tid}]
 
-    async def _step(key: str, message: str, *, streaming: bool = False) -> str:
+        async def _step(key: str, message: str, *, streaming: bool = False) -> str:
+            try:
+                if streaming:
+                    parts: list[str] = []
+                    async for chunk in client.send_message_streaming(key, message):
+                        parts.append(chunk)
+                    text = "\n".join(parts)
+                else:
+                    text = await client.send_message(key, message)
+                log.append({"step": key, "ok": True, "chars": len(text)})
+                return text
+            except Exception as exc:
+                record_error(f"A2A · {key}", exc, fallback="stop_pipeline")
+                log.append({"step": key, "ok": False, "error": str(exc)})
+                raise
+
         try:
-            if streaming:
-                parts: list[str] = []
-                async for chunk in client.send_message_streaming(key, message):
-                    parts.append(chunk)
-                text = "\n".join(parts)
-            else:
-                text = await client.send_message(key, message)
-            log.append({"step": key, "ok": True, "chars": len(text)})
-            return text
-        except Exception as exc:
-            log.append({"step": key, "ok": False, "error": str(exc)})
-            raise
-
-    try:
-        await _step("monitor", f"Scan clinical intake for new files related to {pid}")
-        extract_raw = await _step("extractor", f"Extract clinical data for {pid}")
-        norm_raw = await _step("normalizer", f"Normalize clinical data for {pid}")
-        report_raw = await _step("validator", f"Validate {pid}")
-    except Exception:
-        return json.dumps({"patient_id": pid, "pipeline": log, "stopped": True}, indent=2)
-
-    from shared.guardrails.guardrail_manager import evaluate_hitl_escalation
-
-    report = try_parse_json(report_raw) or {}
-    norm = try_parse_json(norm_raw) or {}
-    risk = str(report.get("risk_level") or "low").lower()
-    blocked = bool(report.get("discharge_blocked"))
-    gate = report.get("release_gate") or evaluate_hitl_escalation(risk, blocked)
-    gate_ok = not gate.get("mandatory_hitl", blocked or risk == "high")
-
-
-    summary_text = None
-    if gate_ok:
-        extraction = norm.get("normalized_extraction")
-        if not isinstance(extraction, dict):
-            extraction = try_parse_json(extract_raw) or {}
-        payload = {
-            "patient_id": pid,
-            "risk_level": risk,
-            "discharge_blocked": blocked,
-            "audience": "patient",
-            "normalized_extraction": extraction,
-        }
-        try:
-            summary_text = await _step(
-                "summary",
-                json.dumps(payload),
-                streaming=True,
-            )
+            with observation(
+                "Monitor Agent",
+                kind="agent",
+                input_payload={"patient_id": pid},
+                metadata={"agent": "Discharge Monitor Agent"},
+            ):
+                with observation("scan_patients", kind="span", input_payload={"patient_id": pid}):
+                    await _step("monitor", f"Scan clinical intake for new files related to {pid}")
+            with observation("Extractor Agent", kind="agent", input_payload={"patient_id": pid}):
+                extract_raw = await _step("extractor", f"Extract clinical data for {pid}")
+            with observation("Normalizer Agent", kind="agent", input_payload={"patient_id": pid}):
+                norm_raw = await _step("normalizer", f"Normalize clinical data for {pid}")
+            with observation("Validator Agent", kind="agent", input_payload={"patient_id": pid}):
+                report_raw = await _step("validator", f"Validate {pid}")
         except Exception:
-            pass
-    else:
-        log.append(
-            {
-                "step": "summary",
-                "ok": False,
-                "skipped": True,
-                "reason": f"release gate: risk={risk} blocked={blocked}",
-            }
-        )
+            flush()
+            return json.dumps({"patient_id": pid, "pipeline": log, "stopped": True}, indent=2)
 
-    return json.dumps(
-        {
-            "patient_id": pid,
-            "trace_id": tid,
-            "risk_level": risk,
-            "discharge_blocked": blocked,
-            "recommendation": report.get("recommendation"),
-            "pipeline": log,
-            "summary_preview": (summary_text or "")[:800] or None,
-        },
-        indent=2,
-        ensure_ascii=False,
-    )
+        from shared.guardrails.guardrail_manager import evaluate_hitl_escalation
+
+        report = try_parse_json(report_raw) or {}
+        norm = try_parse_json(norm_raw) or {}
+        risk = str(report.get("risk_level") or "low").lower()
+        blocked = bool(report.get("discharge_blocked"))
+        gate = report.get("release_gate") or evaluate_hitl_escalation(risk, blocked)
+        gate_ok = not gate.get("mandatory_hitl", blocked or risk == "high")
+
+        summary_text = None
+        with observation(
+            "Final Discharge Summary",
+            kind="agent",
+            input_payload={"patient_id": pid, "allow": gate_ok, "agent": "Summary Agent"},
+        ) as sum_span:
+            if gate_ok:
+                extraction = norm.get("normalized_extraction")
+                if not isinstance(extraction, dict):
+                    extraction = try_parse_json(extract_raw) or {}
+                payload = {
+                    "patient_id": pid,
+                    "risk_level": risk,
+                    "discharge_blocked": blocked,
+                    "audience": "patient",
+                    "normalized_extraction": extraction,
+                }
+                try:
+                    summary_text = await _step(
+                        "summary",
+                        json.dumps(payload),
+                        streaming=True,
+                    )
+                    sum_span.set_output({"generated": True, "chars": len(summary_text or "")})
+                except Exception as exc:
+                    record_error("Summary Agent", exc, fallback="skip_summary")
+                    sum_span.set_output({"generated": False, "error": str(exc)})
+            else:
+                sum_span.set_output({"generated": False, "skipped": True, "reason": "release_gate"})
+                log.append(
+                    {
+                        "step": "summary",
+                        "ok": False,
+                        "skipped": True,
+                        "reason": "release_gate",
+                    }
+                )
+
+        flush()
+        return json.dumps(
+            {
+                "patient_id": pid,
+                "trace_id": tid,
+                "risk_level": risk,
+                "discharge_blocked": blocked,
+                "recommendation": report.get("recommendation"),
+                "pipeline": log,
+                "gate": gate,
+                "summary_preview": (summary_text or "")[:800] or None,
+                "summary_chars": len(summary_text or ""),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
 
 
 list_tool = FunctionTool(list_remote_agents)

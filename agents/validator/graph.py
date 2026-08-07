@@ -40,16 +40,15 @@ async def run_validation(patient_id: str, normalization: dict) -> dict:
     must include normalized_extraction and translation_confidence.
     Returns the audit report dict (from clinical_insight_reporter).
     """
-    from shared.tracing.langfuse import flush, record_span, start_case_trace
-
-    tid = start_case_trace(str(patient_id))
-    record_span(
-        "validator.run",
-        kind="agent",
-        input_payload={"patient_id": patient_id},
-        metadata={"trace_id": tid},
-        trace_id=tid,
+    from shared.tracing.langfuse import (
+        flush,
+        get_current_trace_id,
+        observation,
+        start_case_trace,
     )
+
+    # Adopt Host trace when present — never open a nested Trace.
+    tid = get_current_trace_id() or start_case_trace(str(patient_id))
     initial_state: ValidatorState = {
         "patient_id": str(patient_id),
         "normalization": normalization or {},
@@ -67,11 +66,40 @@ async def run_validation(patient_id: str, normalization: dict) -> dict:
         "errors": [],
     }
     config = {"configurable": {"thread_id": f"validator-{patient_id}-{tid[:8]}"}}
-    final_state = await validator_graph.ainvoke(initial_state, config=config)
+    with observation(
+        "validate_clinical_record",
+        kind="chain",
+        input_payload={"patient_id": patient_id},
+        metadata={"agent": "Validator Agent"},
+        trace_id=tid,
+    ) as val:
+        final_state = await validator_graph.ainvoke(initial_state, config=config)
+        report = final_state.get("report") or {}
+        val.set_output(
+            {
+                "risk_tier": final_state.get("risk_tier"),
+                "discharge_blocked": final_state.get("discharge_blocked"),
+                "findings": len(final_state.get("all_findings") or []),
+            }
+        )
+    from shared.tracing.langfuse import record_span
+
+    record_span(
+        "Agent Output",
+        kind="span",
+        input_payload={"patient_id": patient_id},
+        output_payload={
+            "risk_tier": final_state.get("risk_tier"),
+            "discharge_blocked": final_state.get("discharge_blocked"),
+            "recommendation": (report if isinstance(report, dict) else {}).get("recommendation"),
+            "findings": len(final_state.get("all_findings") or []),
+        },
+        metadata={"agent": "Validator Agent"},
+        trace_id=tid,
+    )
     flush()
     # Report alone used to drop elicitation fills — attach post-callback extraction
     # so HITL / RAG can index attending / age / etc. the Rules Engine just applied.
-    report = final_state.get("report") or {}
     if not isinstance(report, dict):
         report = {"report": report}
     else:

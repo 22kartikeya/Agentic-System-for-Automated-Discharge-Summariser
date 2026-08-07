@@ -49,18 +49,36 @@ async def discover_clinical_intake() -> str:
 
     This is the Monitor's only way to learn about intake files.
     """
+    import time
+
+    from shared.tracing.langfuse import record_mcp_tool
+
     root = get_clinical_root()
     url = _primary_mcp_url()
     logger.info("Monitor opening MCP with Root %s → %s", root.uri, url)
 
-    async with Client(url, roots=[root]) as client:
-        # No path arguments — Watcher uses ctx.list_roots() only
-        result = await client.call_tool("clinical_watcher", {})
-
-    # FastMCP returns a CallToolResult-like object; normalize to text
-    text = _tool_result_to_text(result)
-    logger.info("Watcher returned %s char(s)", len(text))
-    return text
+    t0 = time.perf_counter()
+    error: str | None = None
+    text = ""
+    try:
+        async with Client(url, roots=[root]) as client:
+            # No path arguments — Watcher uses ctx.list_roots() only
+            result = await client.call_tool("clinical_watcher", {})
+        text = _tool_result_to_text(result)
+        logger.info("Watcher returned %s char(s)", len(text))
+        return text
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        record_mcp_tool(
+            "clinical_watcher",
+            params={"roots": [str(root.uri)], "note": "no path args — Roots only"},
+            result={"chars": len(text or ""), "preview": (text or "")[:400]},
+            duration_ms=(time.perf_counter() - t0) * 1000,
+            success=error is None,
+            error=error,
+        )
 
 
 def _tool_result_to_text(result: object) -> str:

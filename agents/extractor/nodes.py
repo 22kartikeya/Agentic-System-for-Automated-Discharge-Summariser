@@ -157,25 +157,129 @@ def _resource_text(read_result) -> str:
 
 
 async def harvest_node(state: ExtractorState) -> dict:
-    """Call the Clinical Data Harvester tool for every requested doc_type."""
+    """Call the Clinical Data Harvester tool for every requested doc_type.
+
+    Also loads discharge-extraction-prompt + MCP Resources under the same
+    ``load_documents`` span (observability hierarchy — same work as before).
+    """
+    import time
+
+    from shared.tracing.langfuse import observation, record_mcp_tool
+
     url = _primary_mcp_url()
     harvested: dict[str, dict] = {}
     errors: list[str] = list(state.get("errors", []))
+    resources: dict[str, str] = {}
+    resources_used: dict[str, str] = {}
+    instructions = ""
 
-    async with Client(url) as client:
-        for doc_type in state["doc_types"]:
-            result = await client.call_tool(
-                "clinical_data_harvester",
-                {"patient_id": state["patient_id"], "doc_type": doc_type},
-                raise_on_error=False,
-            )
-            parsed = _tool_result_to_dict(result)
-            harvested[doc_type] = parsed
-            if parsed.get("error"):
-                errors.append(f"{doc_type}: {parsed['error']}")
+    with observation(
+        "load_documents",
+        kind="span",
+        input_payload={
+            "patient_id": state["patient_id"],
+            "doc_types": state["doc_types"],
+        },
+        metadata={"agent": "Extractor Agent"},
+    ) as load:
+        async with Client(url) as client:
+            with observation(
+                "MCP Prompt",
+                kind="prompt",
+                input_payload={
+                    "name": "discharge-extraction-prompt",
+                    "parameters": {
+                        "language": "auto-detect",
+                        "doc_types": ",".join(state["doc_types"]),
+                    },
+                },
+            ) as prompt_span:
+                prompt_result = await client.get_prompt(
+                    "discharge-extraction-prompt",
+                    {
+                        "language": "auto-detect",
+                        "doc_types": ",".join(state["doc_types"]),
+                    },
+                )
+                instructions = _prompt_text(prompt_result)
+                prompt_span.set_output(
+                    {
+                        "prompt_name": "discharge-extraction-prompt",
+                        "chars": len(instructions),
+                    }
+                )
+
+            for doc_type in state["doc_types"]:
+                params = {"patient_id": state["patient_id"], "doc_type": doc_type}
+                t0 = time.perf_counter()
+                result = await client.call_tool(
+                    "clinical_data_harvester",
+                    params,
+                    raise_on_error=False,
+                )
+                elapsed = (time.perf_counter() - t0) * 1000
+                parsed = _tool_result_to_dict(result)
+                harvested[doc_type] = parsed
+                ok = not bool(parsed.get("error"))
+                record_mcp_tool(
+                    "clinical_data_harvester",
+                    params=params,
+                    result={
+                        "doc_type": doc_type,
+                        "error": parsed.get("error"),
+                        "source_file": parsed.get("source_file"),
+                        "text_chars": len(str(parsed.get("raw_text") or "")),
+                    },
+                    duration_ms=elapsed,
+                    success=ok,
+                    error=str(parsed.get("error") or "") or None,
+                )
+                if parsed.get("error"):
+                    errors.append(f"{doc_type}: {parsed['error']}")
+
+            with observation(
+                "Resource",
+                kind="resource",
+                input_payload={"patient_id": state["patient_id"]},
+            ) as res_span:
+                for doc_type, uri_template in _RESOURCE_BY_DOC_TYPE.items():
+                    if doc_type not in state["doc_types"]:
+                        continue
+                    uri = uri_template.format(patient_id=state["patient_id"])
+                    try:
+                        read_result = await client.read_resource(uri)
+                        text = _resource_text(read_result)
+                        resources[uri] = text
+                        resources_used[uri] = f"{len(text)} chars"
+                        logger.info("Read MCP resource %s (%s chars)", uri, len(text))
+                    except Exception as exc:
+                        note = f"resource {uri}: {exc}"
+                        errors.append(note)
+                        resources_used[uri] = f"error: {exc}"
+                # Harvested docs also count as loaded resources for the trace
+                res_span.set_output(
+                    {
+                        "mcp_resources": resources_used,
+                        "harvested_types": list(harvested.keys()),
+                    }
+                )
+
+        load.set_output(
+            {
+                "harvested_types": list(harvested.keys()),
+                "prompt": "discharge-extraction-prompt",
+                "resources": resources_used,
+                "errors": errors,
+            }
+        )
 
     logger.info("Harvested %s doc_type(s) for %s", len(harvested), state["patient_id"])
-    return {"harvested": harvested, "errors": errors}
+    return {
+        "harvested": harvested,
+        "resources": resources,
+        "prompt_text": instructions,
+        "errors": errors,
+    }
 
 
 def _coerce_and_validate(schema: type[BaseModel], args: dict) -> BaseModel:
@@ -278,37 +382,93 @@ def _parse_json_object(text: str) -> dict:
 
 async def _extract_one(llm, schema: type[BaseModel], system: str, raw_text: str) -> BaseModel:
     """Structured extraction with one JSON retry (same LLM path, SSoT simplicity)."""
+    import time
+
+    from shared.tracing.langfuse import observation
+
     structured_llm = llm.with_structured_output(schema, include_raw=True)
-    try:
-        response = await structured_llm.ainvoke(
-            [SystemMessage(content=system), HumanMessage(content=raw_text)]
-        )
-        if response.get("parsed") is not None:
-            return response["parsed"]
-        raw_message = response.get("raw")
-        tool_calls = getattr(raw_message, "tool_calls", None) or []
-        if tool_calls:
-            return _coerce_and_validate(schema, tool_calls[0].get("args", {}) or {})
-        err = response.get("parsing_error")
-        raise ValueError(f"LLM returned no structured output ({err})")
-    except Exception as first_exc:
-        logger.warning("Structured extract retry via JSON: %s", first_exc)
-        retry_system = (
-            f"{system}\n\n"
-            "IMPORTANT: Reply with ONLY one JSON object matching the extraction fields. "
-            "Copy every medication / lab test / bill line from the source. "
-            "Do not wrap in markdown."
-        )
-        reply = await llm.ainvoke(
-            [SystemMessage(content=retry_system), HumanMessage(content=raw_text)]
-        )
-        content = getattr(reply, "content", None)
-        if isinstance(content, list):
-            content = "".join(
-                str(part.get("text", part)) if isinstance(part, dict) else str(part)
-                for part in content
+    model_name = getattr(llm, "model_id", None) or getattr(llm, "model", None) or "bedrock"
+    with observation(
+        "extract_record",
+        kind="chain",
+        input_payload={"schema": schema.__name__, "text_chars": len(raw_text or "")},
+        metadata={"agent": "Extractor Agent"},
+    ) as rec:
+        with observation(
+            "Prompt",
+            kind="prompt",
+            input_payload={"system_chars": len(system or ""), "schema": schema.__name__},
+        ) as pspan:
+            pspan.set_output({"ok": True})
+
+        t0 = time.perf_counter()
+        parsed: BaseModel | None = None
+        try:
+            with observation(
+                "LLM Generation",
+                kind="generation",
+                input_payload={"prompt": system[:1500], "user_chars": len(raw_text or "")},
+                metadata={"schema": schema.__name__},
+                model=str(model_name),
+            ) as gen:
+                response = await structured_llm.ainvoke(
+                    [SystemMessage(content=system), HumanMessage(content=raw_text)]
+                )
+                if response.get("parsed") is not None:
+                    parsed = response["parsed"]
+                    gen.set_output({"parsed": True, "type": schema.__name__})
+                    gen.model = str(model_name)
+                    gen.metadata["latency_ms"] = (time.perf_counter() - t0) * 1000
+                else:
+                    raw_message = response.get("raw")
+                    tool_calls = getattr(raw_message, "tool_calls", None) or []
+                    if tool_calls:
+                        parsed = _coerce_and_validate(
+                            schema, tool_calls[0].get("args", {}) or {}
+                        )
+                        gen.set_output({"parsed_via_tool_calls": True})
+                        gen.metadata["latency_ms"] = (time.perf_counter() - t0) * 1000
+                    else:
+                        err = response.get("parsing_error")
+                        raise ValueError(f"LLM returned no structured output ({err})")
+        except Exception as first_exc:
+            logger.warning("Structured extract retry via JSON: %s", first_exc)
+            retry_system = (
+                f"{system}\n\n"
+                "IMPORTANT: Reply with ONLY one JSON object matching the extraction fields. "
+                "Copy every medication / lab test / bill line from the source. "
+                "Do not wrap in markdown."
             )
-        return _coerce_and_validate(schema, _parse_json_object(str(content or "")))
+            with observation(
+                "LLM Generation",
+                kind="generation",
+                input_payload={"prompt": retry_system[:1500], "retry": True},
+                model=str(model_name),
+            ) as gen:
+                reply = await llm.ainvoke(
+                    [SystemMessage(content=retry_system), HumanMessage(content=raw_text)]
+                )
+                content = getattr(reply, "content", None)
+                if isinstance(content, list):
+                    content = "".join(
+                        str(part.get("text", part)) if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
+                parsed = _coerce_and_validate(schema, _parse_json_object(str(content or "")))
+                gen.set_output(
+                    {
+                        "completion_chars": len(str(content or "")),
+                        "latency_ms": (time.perf_counter() - t0) * 1000,
+                    }
+                )
+
+        assert parsed is not None
+        with observation("Output", kind="span") as out:
+            out.set_output(
+                parsed.model_dump() if hasattr(parsed, "model_dump") else str(parsed)[:2000]
+            )
+        rec.set_output({"ok": True, "schema": schema.__name__})
+        return parsed
 
 
 async def _extract_json_force(
@@ -983,36 +1143,37 @@ def _infer_discharge_approved(raw_text: str, current: bool | None) -> bool | Non
 
 
 async def extract_node(state: ExtractorState) -> dict:
-    """Resources + Prompt + structure fields for this patient_id."""
-    url = _primary_mcp_url()
+    """Structure fields for this patient_id (prompt/resources already in state)."""
+    from shared.tracing.langfuse import observation, record_span
+
     patient_id = state["patient_id"]
     errors = list(state.get("errors", []))
-    resources: dict[str, str] = {}
-    resources_used: dict[str, str] = {}
+    resources: dict[str, str] = dict(state.get("resources") or {})
+    resources_used: dict[str, str] = {
+        uri: f"{len(text)} chars" for uri, text in resources.items()
+    }
+    instructions = state.get("prompt_text") or ""
 
-    async with Client(url) as client:
-        # --- MCP Prompts (SSoT §3.4 / §5.2) ---
-        prompt_result = await client.get_prompt(
-            "discharge-extraction-prompt",
-            {"language": "auto-detect", "doc_types": ",".join(state["doc_types"])},
-        )
-        instructions = _prompt_text(prompt_result)
+    # Fallback if load_documents did not populate prompt (should not happen)
+    if not instructions.strip():
+        url = _primary_mcp_url()
+        async with Client(url) as client:
+            prompt_result = await client.get_prompt(
+                "discharge-extraction-prompt",
+                {"language": "auto-detect", "doc_types": ",".join(state["doc_types"])},
+            )
+            instructions = _prompt_text(prompt_result)
 
-        # --- MCP Resources (SSoT §3.3 / §5.2) — any patient_id, template filled at runtime ---
-        for doc_type, uri_template in _RESOURCE_BY_DOC_TYPE.items():
-            if doc_type not in state["doc_types"]:
-                continue
-            uri = uri_template.format(patient_id=patient_id)
-            try:
-                read_result = await client.read_resource(uri)
-                text = _resource_text(read_result)
-                resources[uri] = text
-                resources_used[uri] = f"{len(text)} chars"
-                logger.info("Read MCP resource %s (%s chars)", uri, len(text))
-            except Exception as exc:
-                note = f"resource {uri}: {exc}"
-                errors.append(note)
-                resources_used[uri] = f"error: {exc}"
+    with observation(
+        "classify_documents",
+        kind="span",
+        input_payload={
+            "doc_types": state["doc_types"],
+            "harvested": list((state.get("harvested") or {}).keys()),
+        },
+        metadata={"agent": "Extractor Agent"},
+    ) as classify:
+        classify.set_output({"doc_types": state["doc_types"]})
 
     llm = None
     source_files: dict[str, str] = {}
@@ -1149,6 +1310,20 @@ async def extract_node(state: ExtractorState) -> dict:
     extraction.resources_used = resources_used
     extraction.notes = errors
 
+    dumped = extraction.model_dump()
+    record_span(
+        "Agent Output",
+        kind="span",
+        input_payload={"patient_id": patient_id},
+        output_payload={
+            "has_discharge": bool(dumped.get("discharge")),
+            "has_lab": bool(dumped.get("lab")),
+            "has_bill": bool(dumped.get("bill")),
+            "errors": errors,
+        },
+        metadata={"agent": "Extractor Agent"},
+    )
+
     logger.info(
         "Extraction complete for %s (resources=%s, errors=%s)",
         patient_id,
@@ -1157,6 +1332,6 @@ async def extract_node(state: ExtractorState) -> dict:
     )
     return {
         "resources": resources,
-        "extraction": extraction.model_dump(),
+        "extraction": dumped,
         "errors": errors,
     }

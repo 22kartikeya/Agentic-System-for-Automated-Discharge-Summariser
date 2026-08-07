@@ -129,6 +129,10 @@ def _apply_translated_overlay(extraction: dict, translated_text: str) -> dict:
 
 async def prepare_node(state: NormalizerState) -> dict:
     """Fetch MCP Prompt + medical-abbreviations Resource (no Sampling yet)."""
+    import time
+
+    from shared.tracing.langfuse import observation, record_span
+
     url = _primary_mcp_url()
     extraction = state.get("extraction") or {}
     raw_lang = state.get("source_language") or detect_source_language(extraction)
@@ -136,15 +140,29 @@ async def prepare_node(state: NormalizerState) -> dict:
     errors = list(state.get("errors", []))
 
     async with Client(url) as client:
-        prompt_result = await client.get_prompt(
-            "abbreviation-normalization-prompt",
-            {"source_language": source_language},
-        )
-        prompt_text = _prompt_text(prompt_result)
+        with observation(
+            "Prompt",
+            kind="prompt",
+            input_payload={"name": "abbreviation-normalization-prompt", "source_language": source_language},
+            metadata={"agent": "Normalizer Agent"},
+        ) as pspan:
+            prompt_result = await client.get_prompt(
+                "abbreviation-normalization-prompt",
+                {"source_language": source_language},
+            )
+            prompt_text = _prompt_text(prompt_result)
+            pspan.set_output({"chars": len(prompt_text)})
 
         try:
             read_result = await client.read_resource("resource://medical-abbreviations")
             abbreviations_yaml = _resource_text(read_result)
+            record_span(
+                "Resources",
+                kind="resource",
+                input_payload={"uri": "resource://medical-abbreviations"},
+                output_payload={"chars": len(abbreviations_yaml)},
+                metadata={"agent": "Normalizer Agent"},
+            )
         except Exception as exc:
             abbreviations_yaml = ""
             errors.append(f"abbreviations resource: {exc}")
@@ -167,6 +185,10 @@ async def prepare_node(state: NormalizerState) -> dict:
 
 async def bridge_node(state: NormalizerState) -> dict:
     """Call Medical Lang Bridge with sampling_callback wired (SSoT §3.6)."""
+    import time
+
+    from shared.tracing.langfuse import record_mcp_tool, record_translation
+
     url = _primary_mcp_url()
     extraction = state.get("extraction") or {}
     source_language = normalize_lang_code(state.get("source_language") or "auto")
@@ -189,19 +211,39 @@ async def bridge_node(state: NormalizerState) -> dict:
 
     # Clinical JSON only — MCP prompt goes to `instructions` (system_prompt)
     clinical_text = _clinical_text_blob(extraction)
+    params = {
+        "text": clinical_text,
+        "source_language": source_language,
+        "instructions": instructions,
+    }
 
+    # Sampling → LiteLLM records "LLM Generation"; tool is a sibling under normalize.
+    t0 = time.perf_counter()
     async with Client(url, sampling_handler=sampling_callback) as client:
         result = await client.call_tool(
             "medical_lang_bridge",
-            {
-                "text": clinical_text,
-                "source_language": source_language,
-                "instructions": instructions,
-            },
+            params,
             raise_on_error=False,
         )
-
+    elapsed = (time.perf_counter() - t0) * 1000
     bridge_raw = _tool_result_to_text(result)
+    record_mcp_tool(
+        "medical_lang_bridge",
+        params={"source_language": source_language, "text_chars": len(clinical_text)},
+        result={"chars": len(bridge_raw)},
+        duration_ms=elapsed,
+        success="error" not in bridge_raw.lower()[:80],
+    )
+    try:
+        parsed = json.loads(bridge_raw)
+    except json.JSONDecodeError:
+        parsed = {"raw": bridge_raw[:500]}
+    record_translation(
+        source_language=source_language,
+        result=parsed if isinstance(parsed, dict) else {"raw_chars": len(bridge_raw)},
+        metadata={"agent": "Normalizer Agent"},
+    )
+
     logger.info(
         "Lang Bridge returned %s char(s) for patient=%s lang=%s",
         len(bridge_raw),
@@ -294,6 +336,20 @@ async def assemble_node(state: NormalizerState) -> dict:
         normalized_extraction=normalized,
         notes=errors,
     )
+    from shared.tracing.langfuse import record_span
+
+    dumped = result.model_dump()
+    record_span(
+        "Output",
+        kind="span",
+        input_payload={"patient_id": state["patient_id"]},
+        output_payload={
+            "translation_confidence": dumped.get("translation_confidence"),
+            "source_language": dumped.get("source_language"),
+            "model_used": dumped.get("model_used"),
+        },
+        metadata={"agent": "Normalizer Agent"},
+    )
     logger.info(
         "Normalization complete patient=%s lang=%s path=%s confidence=%s",
         state["patient_id"],
@@ -301,4 +357,4 @@ async def assemble_node(state: NormalizerState) -> dict:
         path,
         result.translation_confidence,
     )
-    return {"result": result.model_dump(), "errors": errors}
+    return {"result": dumped, "errors": errors}

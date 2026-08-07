@@ -7,6 +7,7 @@ from the Medical Lang Bridge Sampling request.
 from __future__ import annotations
 
 import os
+import time
 
 import litellm
 
@@ -56,6 +57,55 @@ def resolve_litellm_model(hint_names: list[str]) -> str:
     return f"bedrock/{bedrock['model_id']}"
 
 
+def _usage_from_response(response: object) -> dict[str, int]:
+    usage = getattr(response, "usage", None)
+    if usage is None and isinstance(response, dict):
+        usage = response.get("usage")
+    if usage is None:
+        return {}
+    prompt = getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None)
+    completion = getattr(usage, "completion_tokens", None) or getattr(
+        usage, "output_tokens", None
+    )
+    total = getattr(usage, "total_tokens", None)
+    if isinstance(usage, dict):
+        prompt = usage.get("prompt_tokens") or usage.get("input_tokens")
+        completion = usage.get("completion_tokens") or usage.get("output_tokens")
+        total = usage.get("total_tokens")
+    out: dict[str, int] = {}
+    if prompt is not None:
+        out["input"] = int(prompt)
+    if completion is not None:
+        out["output"] = int(completion)
+    if total is not None:
+        out["total"] = int(total)
+    elif out:
+        out["total"] = int(out.get("input", 0)) + int(out.get("output", 0))
+    return out
+
+
+def _record_llm(
+    model: str, messages: list[dict], text: str, response: object, started: float
+) -> None:
+    try:
+        from shared.tracing.langfuse import record_generation
+
+        usage = _usage_from_response(response)
+        record_generation(
+            "LLM Generation",
+            model=model,
+            prompt=messages,
+            completion=text,
+            input_tokens=usage.get("input"),
+            output_tokens=usage.get("output"),
+            total_tokens=usage.get("total"),
+            duration_ms=(time.perf_counter() - started) * 1000,
+            metadata={"via": "shared.llm"},
+        )
+    except Exception as exc:
+        logger.info("LLM trace skipped: %s", exc)
+
+
 def run_completion(
     *,
     messages: list[dict],
@@ -68,6 +118,7 @@ def run_completion(
     tokens = max_tokens or get_bedrock_config()["max_tokens"]
     logger.info("LiteLLM completion model=%s hints=%s", model, hint_names)
 
+    started = time.perf_counter()
     response = litellm.completion(
         model=model,
         messages=messages,
@@ -75,6 +126,7 @@ def run_completion(
         temperature=temperature,
     )
     text = response.choices[0].message.content or ""
+    _record_llm(model, messages, text, response, started)
     return text, model
 
 
@@ -90,6 +142,7 @@ async def arun_completion(
     tokens = max_tokens or get_bedrock_config()["max_tokens"]
     logger.info("LiteLLM acompletion model=%s hints=%s", model, hint_names)
 
+    started = time.perf_counter()
     response = await litellm.acompletion(
         model=model,
         messages=messages,
@@ -97,4 +150,5 @@ async def arun_completion(
         temperature=temperature,
     )
     text = response.choices[0].message.content or ""
+    _record_llm(model, messages, text, response, started)
     return text, model

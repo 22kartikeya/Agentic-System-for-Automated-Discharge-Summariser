@@ -38,6 +38,17 @@ def reset_elicitation_handler(token) -> None:
 async def auto_decline_elicitation_handler(message, response_type, params, context) -> ElicitResult:
     """Always decline when no human reviewer is attached."""
     logger.info("Elicitation auto-declined: %s", message)
+    try:
+        from shared.tracing.langfuse import record_elicitation
+
+        record_elicitation(
+            schema={"message": str(message or "")},
+            reviewer_response=None,
+            action="decline",
+            metadata={"agent": "Validator Agent", "mode": "auto_decline"},
+        )
+    except Exception as exc:
+        logger.info("Elicitation trace skipped: %s", exc)
     return ElicitResult(action="decline")
 
 
