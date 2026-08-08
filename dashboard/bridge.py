@@ -619,69 +619,131 @@ def revalidate_case(
     *,
     elicit_answers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Re-run Validator on the edited working case (optional elicit answers)."""
+    """Re-run Validator only on the edited working case (HITL Corrections).
+
+    LangFuse: Host Agent → Validator Agent (no Extractor / Normalizer).
+    """
     from agents.validator.graph import run_validation
+    from shared.tracing.langfuse import case_trace, observation, record_error
 
     pid = str(case.get("patient_id") or "")
+    working = dict(case or {})
     if elicit_answers:
         for key, val in elicit_answers.items():
             if val is not None:
-                case[key] = val
+                working[key] = val
 
-    norm = case_to_normalization(case)
+    norm = case_to_normalization(working)
 
-    async def _go():
-        # Install staged elicitation handler when answers provided
-        token = None
-        try:
-            if elicit_answers is not None:
-                from agents.validator.elicitation_handler import (
-                    reset_elicitation_handler,
-                    set_elicitation_handler,
-                )
-                from dashboard.elicitation_callback import (
-                    stage_elicitation_response,
-                    streamlit_elicitation_handler,
-                )
-                
-                stage_elicitation_response("accept", elicit_answers)
-
-                async def _handler(message, response_type, params, context):
-                    return await streamlit_elicitation_handler(
-                        message, response_type, params, context
+    async def _go() -> dict[str, Any]:
+        # case_trace must run on this asyncio thread so ContextVars nest correctly
+        with case_trace(pid) as tid:
+            token = None
+            try:
+                if elicit_answers is not None:
+                    from agents.validator.elicitation_handler import (
+                        reset_elicitation_handler,
+                        set_elicitation_handler,
+                    )
+                    from dashboard.elicitation_callback import (
+                        stage_elicitation_response,
+                        streamlit_elicitation_handler,
                     )
 
-                token = set_elicitation_handler(_handler)
-            report = await run_validation(pid, norm)
-            return report
-        finally:
-            if token is not None:
-                from agents.validator.elicitation_handler import reset_elicitation_handler
+                    stage_elicitation_response("accept", elicit_answers)
 
-                reset_elicitation_handler(token)
+                    async def _handler(message, response_type, params, context):
+                        return await streamlit_elicitation_handler(
+                            message, response_type, params, context
+                        )
+
+                    token = set_elicitation_handler(_handler)
+
+                with observation(
+                    "Validator Agent",
+                    kind="agent",
+                    input_payload={
+                        "patient_id": pid,
+                        "mode": "hitl_revalidate",
+                        "elicit_fields": sorted((elicit_answers or {}).keys()),
+                    },
+                    metadata={
+                        "agent": "Validator Agent",
+                        "mode": "hitl_revalidate",
+                    },
+                ) as val_span:
+                    report = await run_validation(pid, norm)
+                    val_span.set_output(
+                        {
+                            "risk_level": (report or {}).get("risk_level"),
+                            "discharge_blocked": (report or {}).get("discharge_blocked"),
+                            "recommendation": (report or {}).get("recommendation"),
+                        }
+                    )
+            finally:
+                if token is not None:
+                    from agents.validator.elicitation_handler import (
+                        reset_elicitation_handler,
+                    )
+
+                    reset_elicitation_handler(token)
+
+            validation = normalize_validation(report)
+            updated = case_after_validation(
+                norm, report if isinstance(report, dict) else None
+            )
+            # Preserve bill/med edits from the working case
+            updated["medications"] = working.get("medications") or updated.get(
+                "medications"
+            )
+            updated["allergies"] = working.get("allergies") or updated.get("allergies")
+            updated["bill"] = working.get("bill") or updated.get("bill")
+            updated["follow_up_appointment"] = working.get("follow_up_appointment")
+            updated["discharge_ok"] = working.get("discharge_ok")
+            if elicit_answers:
+                for key, val in elicit_answers.items():
+                    if val not in ("", None):
+                        updated[key] = val
+            updated["_normalization"] = updated.get("_normalization") or norm
+            if isinstance(report, dict) and isinstance(
+                report.get("extraction_after_elicitation"), dict
+            ):
+                updated["_normalized_extraction"] = report[
+                    "extraction_after_elicitation"
+                ]
+
+            with observation(
+                "Workflow Output",
+                kind="span",
+                input_payload={"patient_id": pid, "mode": "hitl_revalidate"},
+            ) as wf:
+                wf.set_output(
+                    {
+                        "trace_id": tid,
+                        "stages_run": ["validate"],
+                        "needs_hitl": bool((validation or {}).get("needs_hitl")),
+                        "discharge_blocked": bool(
+                            (validation or {}).get("discharge_blocked")
+                        ),
+                        "status": "ok",
+                    }
+                )
+
+            return {
+                "case": updated,
+                "result": validation,
+                "trace_id": tid,
+                "stages_run": ["validate"],
+            }
 
     try:
-        report = _run(_go())
-        validation = normalize_validation(report)
-        updated = case_after_validation(norm, report if isinstance(report, dict) else None)
-        # Preserve bill/med edits from the working case
-        updated["medications"] = case.get("medications") or updated.get("medications")
-        updated["allergies"] = case.get("allergies") or updated.get("allergies")
-        updated["bill"] = case.get("bill") or updated.get("bill")
-        updated["follow_up_appointment"] = case.get("follow_up_appointment")
-        updated["discharge_ok"] = case.get("discharge_ok")
-        if elicit_answers:
-            for key, val in elicit_answers.items():
-                if val not in ("", None):
-                    updated[key] = val
-        updated["_normalization"] = updated.get("_normalization") or norm
-        # Keep post-elicitation extraction on the case (do not wipe with pre-validate norm)
-        if isinstance(report, dict) and isinstance(report.get("extraction_after_elicitation"), dict):
-            updated["_normalized_extraction"] = report["extraction_after_elicitation"]
-        return {"case": updated, "result": validation}
+        return _run(_go())
     except Exception as exc:
+        try:
+            record_error("hitl_revalidate", exc, fallback="return_error")
+        except Exception:
+            pass
         return {"case": case, "result": None, "error": str(exc)}
-
 
 def ensure_indexed(case: dict[str, Any], validation: dict[str, Any] | None) -> dict[str, Any]:
     del validation  # indexing is by patient_id in V3 FAISS path

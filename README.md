@@ -98,7 +98,7 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 - **Insight Reporter** — JSON + HTML (+ PDF) under `data/reports/`, stamped with `rules_version` (SHA-256 of `rules.yaml`).
 - **Secondary MCP** (`:8201/analyticstools`) — `calculate_risk_score`, `get_population_benchmarks`, `generate_risk_heatmap`. Hard HITL guardrails (e.g. allergy contradiction) force `high`.
 - **Validator** (`:8101`) — LangGraph `completeness → ehr → risk → report`. Default elicitation auto-declines; Streamlit installs a real handler on re-run.
-- Smoke outcomes (§12): P1019 auto-approves; P1021/P1022 hard/blocking HITL; med-omission → Medium HITL.
+- Smoke outcomes (§12): **P1012** auto-approves (clean EN UTI); P1021/P1022 hard/blocking HITL; med-omission → Medium HITL.
 
 ### Phase 9 — Summary (streaming)
 
@@ -121,7 +121,7 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 - **Process patient** runs extract → normalize → validate in-process (MCP + Bedrock); pages degrade when backends are offline.
 - **Upload** requires discharge + lab + bill; after a full upload the dashboard runs the same Process pipeline. Process is blocked until all three intake types exist on disk.
 - **Validation Report** shows a findings-by-severity risk heatmap (counts + rule/message table) via Secondary MCP, with a local fallback if `:8201` is offline.
-- Corrections: `st.data_editor`, elicitation accept/decline/cancel, approval, re-run (re-indexes RAG with elicited fields); feedback under `data/hitl/`.
+- Corrections: `st.data_editor`, elicitation accept/decline/cancel, approval. **Re-run validation** validates the current working case only (no re-extract / re-normalize); re-indexes RAG with elicited fields. Use **Process patient** if intake files on disk changed. Feedback under `data/hitl/`.
 
 ### Phase 12 — Host
 
@@ -131,7 +131,7 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 
 ### Observability / RAI
 
-- LangFuse traces (cloud when `LANGFUSE_*` set, else local `data/reports/traces/`).
+- LangFuse traces (cloud when `LANGFUSE_*` set, else local `data/reports/traces/`). Process patient nests Monitor→Extractor→Normalizer→Validator; Corrections **Re-run** opens Host → Validator only (`mode=hitl_revalidate`).
 - A2A `trace_id` metadata, PIIRedactor on logs, GuardrailManager release gate.
 - Audit + summary PDF beside JSON/HTML. RAG Generation dual-MCP (Primary+Secondary, Primary-only fallback).
 
@@ -149,7 +149,7 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 | `configs/` | `rules.yaml`, prompts, agent/model/MCP config |
 | `scripts/` | `start.sh` · `stop.sh` · `bedrock_ping.py` · `pack_for_nuvepro.sh` · `e2e_ssot_validate.py` |
 | `tests/` | HITL smoke + patient-search e2e |
-| `data/input/` | MCP Roots workspace (sample corpus P1019–P1024) |
+| `data/input/` | MCP Roots workspace — full packets **P1012**, **P1020–P1024**, plus **P9991–P9995**; P1019 discharge note only (no lab/bill) |
 | `Documentation/` | Specs, seeds, coding style (not runtime) |
 
 ## Manually testing what's built
@@ -157,16 +157,16 @@ Pipeline: **Monitor → Extract → Normalize → Validate (gate) → Summary / 
 ```bash
 # Mock EHR
 curl http://127.0.0.1:8050/health
-curl http://127.0.0.1:8050/patients/P1019
+curl http://127.0.0.1:8050/patients/P1012
 
 # Primary MCP — FastMCP Inspector / CLI
 uv run fastmcp dev mcp_servers/primary/server.py
 
-# Extractor (needs Primary MCP + Bedrock)
+# Extractor (needs Primary MCP + Bedrock) — happy-path EN packet
 uv run python -c "
 import asyncio, json
 from agents.extractor.graph import run_extraction
-print(json.dumps(asyncio.run(run_extraction('P1019')), indent=2, ensure_ascii=False))
+print(json.dumps(asyncio.run(run_extraction('P1012')), indent=2, ensure_ascii=False))
 "
 
 # Normalizer — Hindi sample via Sampling (needs Primary MCP + Bedrock)
@@ -195,9 +195,9 @@ from agents.extractor.graph import run_extraction
 from agents.normalizer.graph import run_normalization
 from agents.validator.graph import run_validation
 async def main():
-    ext = await run_extraction('P1019')
-    norm = await run_normalization('P1019', ext)
-    report = await run_validation('P1019', norm)
+    ext = await run_extraction('P1012')
+    norm = await run_normalization('P1012', ext)
+    report = await run_validation('P1012', norm)
     print(json.dumps(report, indent=2, ensure_ascii=False))
 asyncio.run(main())
 "
@@ -207,19 +207,20 @@ uv run python -c "
 import asyncio, json
 from agents.summary.agent import run_summary
 payload = {
-  'patient_id': 'P1019',
-  'discharge': {'patient_id': 'P1019', 'patient_name': 'Thomas Wright', 'age': 58,
-    'gender': 'M', 'admission_date': '2026-01-01', 'discharge_date': '2026-01-05',
-    'ward': 'Medicine', 'bed_no': '12', 'attending_physician': 'Dr. Patel',
-    'consulting_doctors': [], 'discharge_diagnosis': ['Type 2 Diabetes Mellitus'],
-    'medications': [{'medicine_name': 'Metformin', 'strength': '500 mg',
-      'frequency': 'BID', 'route': 'PO', 'period': '7 days'}],
-    'allergies': [], 'follow_up_appointment': 'Endocrinology in 30 days',
-    'discharge_instructions': 'Monitor blood sugar.', 'discharge_approved': True},
-  'lab': {}, 'bill': {'total_amount': 420.0, 'payment_status': 'PAID'},
+  'patient_id': 'P1012',
+  'discharge': {'patient_id': 'P1012', 'patient_name': 'David Chen', 'age': 34,
+    'gender': 'M', 'admission_date': '2026-07-10', 'discharge_date': '2026-07-12',
+    'ward': '2A', 'bed_no': '08', 'attending_physician': 'Dr. Priya Nair',
+    'consulting_doctors': ['Dr. Nair', 'Dr. Gomez'],
+    'discharge_diagnosis': ['Urinary tract infection (UTI)'],
+    'medications': [{'medicine_name': 'Nitrofurantoin', 'strength': '100 mg',
+      'frequency': 'BID', 'route': 'PO', 'period': '5 days'}],
+    'allergies': [], 'follow_up_appointment': 'PCP on 2026-07-24',
+    'discharge_instructions': 'Complete antibiotic course.', 'discharge_approved': True},
+  'lab': {}, 'bill': {'total_amount': 1339.74, 'payment_status': 'PAID'},
 }
 async def main():
-    s = await run_summary(patient_id='P1019', risk_level='low',
+    s = await run_summary(patient_id='P1012', risk_level='low',
                           discharge_blocked=False, extraction=payload)
     print(json.dumps(s.model_dump(), indent=2, ensure_ascii=False))
 asyncio.run(main())
@@ -230,14 +231,15 @@ uv run python -c "
 import asyncio, json
 from rag.pipeline import ask
 async def main():
-    print(json.dumps(await ask('P1019', 'What medications were prescribed?'), indent=2))
-    print(json.dumps(await ask('P1019', 'Who won the World Cup?'), indent=2))
+    print(json.dumps(await ask('P1012', 'What medications were prescribed?'), indent=2))
+    print(json.dumps(await ask('P1012', 'Who won the World Cup?'), indent=2))
 asyncio.run(main())
 "
 
 # HITL dashboard (lab stack: EHR + MCPs + RAG + Streamlit)
 ./scripts/start.sh
-# Sidebar: search P1019 / Diego → Document Viewer → Process patient
+# Sidebar: search P1012 / Diego → Document Viewer → Process patient
+# Corrections → Re-run validation (validate-only; Process again if files changed)
 # or: uv run python -m dashboard
 
 # Host Orchestrator — Gradio :8083 (needs A2A agents for live pipeline)

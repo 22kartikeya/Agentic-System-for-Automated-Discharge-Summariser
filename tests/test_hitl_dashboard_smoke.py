@@ -188,3 +188,90 @@ def test_ui_chrome_pipeline_html():
     )
     assert "pipeline-track" in html
     assert "blocked" in html
+
+
+def test_corrections_rerun_is_validate_only():
+    """Corrections Re-run must call bridge.revalidate_case — not extract/normalize."""
+    from pathlib import Path
+
+    src = Path("dashboard/corrections.py").read_text(encoding="utf-8")
+    assert "bridge.revalidate_case" in src
+    assert "run_extraction" not in src
+    assert "run_normalization" not in src
+    assert "no re-extract" in src
+
+
+def test_case_to_normalization_keeps_hitl_overlays():
+    from dashboard.bridge import case_to_normalization
+
+    case = {
+        "patient_id": "P1012",
+        "age": 55,
+        "medications": [{"medicine_name": "Aspirin", "strength": "81mg"}],
+        "bill": {"payment_status": "Paid"},
+        "follow_up_appointment": "2026-09-01",
+        "discharge_ok": True,
+        "_normalization": {"patient_id": "P1012", "translation_confidence": 0.9},
+        "_normalized_extraction": {
+            "discharge": {"patient_id": "P1012", "age": 40},
+            "bill": {"payment_status": "Unpaid"},
+        },
+    }
+    norm = case_to_normalization(case)
+    discharge = norm["normalized_extraction"]["discharge"]
+    assert discharge["age"] == 55
+    assert discharge["medications"][0]["medicine_name"] == "Aspirin"
+    assert discharge["follow_up_appointment"] == "2026-09-01"
+    assert discharge["discharge_approved"] is True
+    assert norm["normalized_extraction"]["bill"]["payment_status"] == "Paid"
+
+
+def test_revalidate_case_langfuse_is_validator_only(monkeypatch, tmp_path):
+    """HITL revalidate opens Host → Validator only (no Extractor/Normalizer)."""
+    import json
+
+    import dashboard.bridge as bridge
+    import shared.tracing.langfuse as lf
+
+    monkeypatch.setattr(lf, "_client", None)
+    monkeypatch.setattr(lf, "_client_checked", True)
+    monkeypatch.setattr(lf, "get_path", lambda _key: tmp_path)
+
+    async def fake_validation(patient_id, normalization):
+        assert lf.get_current_trace_id()
+        return {
+            "patient_id": patient_id,
+            "risk_level": "low",
+            "risk_score": 1,
+            "discharge_blocked": False,
+            "recommendation": "auto",
+            "all_findings": [],
+            "extraction_after_elicitation": normalization.get("normalized_extraction"),
+        }
+
+    monkeypatch.setattr(
+        "agents.validator.graph.run_validation", fake_validation
+    )
+
+    case = {
+        "patient_id": "P1012",
+        "age": 55,
+        "_normalization": {"patient_id": "P1012", "translation_confidence": 1.0},
+        "_normalized_extraction": {"discharge": {"patient_id": "P1012", "age": 55}},
+    }
+    out = bridge.revalidate_case(case)
+    assert out.get("error") is None
+    assert out.get("trace_id")
+    assert out.get("stages_run") == ["validate"]
+
+    trace_file = tmp_path / "traces" / f"{out['trace_id']}.json"
+    assert trace_file.exists()
+    events = json.loads(trace_file.read_text(encoding="utf-8")).get("events") or []
+    names = [e.get("name") for e in events if isinstance(e, dict)]
+    assert "Host Agent" in names
+    assert "Validator Agent" in names
+    assert "Workflow Output" in names
+    assert "Extractor Agent" not in names
+    assert "Normalizer Agent" not in names
+    val_ev = next(e for e in events if e.get("name") == "Validator Agent")
+    assert (val_ev.get("metadata") or {}).get("mode") == "hitl_revalidate"

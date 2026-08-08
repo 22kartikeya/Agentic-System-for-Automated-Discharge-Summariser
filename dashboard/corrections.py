@@ -4,12 +4,11 @@ Clinical rules stay in agents/MCP. This page only:
   - shows Critical findings with fix editors
   - edits medications / bill / follow-up / discharge approval
   - batches soft elicitation (accept / decline / cancel)
-  - re-runs extract → normalize → validate with overlays applied
+  - re-validates the working case (Validator only — no re-extract)
 """
 
 from __future__ import annotations
 
-import asyncio
 import html
 import re
 from typing import Any
@@ -209,73 +208,6 @@ def _normalize_med_rows(default_meds: list[Any]) -> list[dict[str, str]]:
             }
         ]
     return rows
-
-
-def _apply_overlays(
-    ext: dict[str, Any],
-    *,
-    case: dict[str, Any] | None,
-    edited_meds: list[dict[str, Any]],
-    elicit_values: dict[str, Any],
-) -> dict[str, Any]:
-    """Merge Corrections edits onto a fresh extraction before normalize/validate."""
-    out = dict(ext or {})
-    discharge = dict(out.get("discharge") or {})
-    bill = dict(out.get("bill") or {}) if isinstance(out.get("bill"), dict) else {}
-
-    meds = [
-        {
-            "medicine_name": (m.get("medicine_name") or m.get("name") or "").strip(),
-            "name": (m.get("medicine_name") or m.get("name") or "").strip(),
-            "strength": m.get("strength") or "",
-            "frequency": m.get("frequency") or "",
-            "route": m.get("route") or "",
-            "period": m.get("period") or "",
-        }
-        for m in edited_meds
-        if (m.get("medicine_name") or m.get("name") or "").strip()
-    ]
-    if meds:
-        discharge["medications"] = meds
-
-    case = case or {}
-    follow = case.get("follow_up_appointment")
-    if follow not in (None, ""):
-        discharge["follow_up_appointment"] = follow
-        discharge["follow_up_appointments"] = follow
-
-    if "discharge_ok" in case:
-        approved = bool(case.get("discharge_ok"))
-        discharge["discharge_approved"] = approved
-
-    if case.get("allergies") is not None:
-        allergies = case.get("allergies") or []
-        if isinstance(allergies, str):
-            allergies = [p.strip() for p in allergies.split(",") if p.strip()]
-        discharge["allergies"] = list(allergies)
-        discharge["adr_allergy_info"] = list(allergies)
-
-    case_bill = case.get("bill") if isinstance(case.get("bill"), dict) else {}
-    if case_bill:
-        bill = {**bill, **case_bill}
-        # Validator compares lowercase "paid"
-        if bill.get("payment_status"):
-            bill["payment_status"] = str(bill["payment_status"]).strip()
-
-    for key, val_e in (elicit_values or {}).items():
-        if val_e in ("", None):
-            continue
-        if key in {"consulting_doctors", "allergies"} and isinstance(val_e, str):
-            discharge[key] = [p.strip() for p in val_e.split(",") if p.strip()]
-            if key == "allergies":
-                discharge["adr_allergy_info"] = discharge[key]
-        else:
-            discharge[key] = val_e
-
-    out["discharge"] = discharge
-    if bill or "bill" in out:
-        out["bill"] = bill
-    return out
 
 
 def page_corrections(
@@ -642,27 +574,16 @@ def page_corrections(
         unsafe_allow_html=True,
     )
     st.caption(
-        "Applies critical fixes + staged elicitation, then re-validates and "
-        "re-indexes RAG with the corrected discharge facts. "
-        "Requires Primary MCP, Secondary MCP, and Mock EHR."
+        "Applies critical fixes + staged elicitation on the current case, then "
+        "re-validates only (no re-extract / re-normalize) and re-indexes RAG. "
+        "Requires Primary MCP, Secondary MCP, and Mock EHR. "
+        "Use Process patient if intake files on disk changed."
     )
 
     if st.button("Re-run validation", type="primary", key=f"rerun_{pid}"):
         status = st.status("Re-running validation…", expanded=True)
         try:
-            from agents.extractor.graph import run_extraction
-            from agents.normalizer.graph import run_normalization
-            from agents.validator.elicitation_handler import (
-                reset_elicitation_handler,
-                set_elicitation_handler,
-            )
-            from agents.validator.graph import run_validation
-            from dashboard.elicitation_callback import streamlit_elicitation_handler
-
             working_case = dict(st.session_state.case or {})
-            # Ensure critical widget values are on the case
-            if "bill" in open_panels and working_case.get("bill"):
-                pass  # already set above
             # Only overlay meds edited for THIS patient (never another case)
             edited_meds = _meds_for_patient(pid, working_case, feedback)
             elicit_values = dict(st.session_state.get("elicitation_values") or {})
@@ -688,56 +609,45 @@ def page_corrections(
                 elicit_values.setdefault(
                     "follow_up_appointment", working_case["follow_up_appointment"]
                 )
+
+            # Push reviewer meds / bill / follow-up onto the working case before validate
+            overlay_meds = edited_meds or list(working_case.get("medications") or [])
+            meds = [
+                m
+                for m in overlay_meds
+                if (m.get("medicine_name") or m.get("name") or "").strip()
+            ]
+            if meds:
+                working_case["medications"] = meds
+                _store_edited_meds(pid, meds)
             if elicit_values:
                 stage_elicitation_response("accept", elicit_values)
                 st.session_state["elicitation_values"] = elicit_values
                 st.session_state["elicitation_values_pid"] = pid
-            else:
-                # Avoid silent auto-decline on Re-run when reviewer already cleared
-                # clinical blocks but left soft fields empty — still need Accept
-                # or values. Prefer decline only when nothing was staged.
-                pass
+                for key, val_e in elicit_values.items():
+                    if val_e in ("", None):
+                        continue
+                    if key in {"consulting_doctors", "allergies"} and isinstance(val_e, str):
+                        working_case[key] = [
+                            p.strip() for p in val_e.split(",") if p.strip()
+                        ]
+                    else:
+                        working_case[key] = val_e
 
-            async def _run():
-                status.write("Extract…")
-                ext = await run_extraction(pid)
-                if not isinstance(ext, dict):
-                    ext = {}
-                # Prefer this patient's case meds when HITL table is empty
-                overlay_meds = edited_meds
-                if not overlay_meds:
-                    overlay_meds = list(working_case.get("medications") or [])
-                ext = _apply_overlays(
-                    ext,
-                    case=working_case,
-                    edited_meds=overlay_meds,
-                    elicit_values=elicit_values,
-                )
-                status.write("Normalize…")
-                norm = await run_normalization(pid, ext)
-                token = set_elicitation_handler(streamlit_elicitation_handler)
-                try:
-                    status.write("Validate (with elicitation + critical overlays)…")
-                    report = await run_validation(pid, norm)
-                finally:
-                    reset_elicitation_handler(token)
-                return norm, report
-
-            norm, report = asyncio.run(_run())
-            validation = bridge.normalize_validation(report) or {}
-            # Prefer post-elicitation extraction (MCP callback fills) for RAG case
-            case_out = bridge.case_after_validation(
-                norm, report if isinstance(report, dict) else None
+            status.write("Validate (current case + HITL overlays)…")
+            out = bridge.revalidate_case(
+                working_case,
+                elicit_answers=elicit_values or None,
             )
+            if out.get("error"):
+                raise RuntimeError(out["error"])
+
+            validation = out.get("result") or {}
+            case_out = dict(out.get("case") or working_case)
+
             # Keep reviewer edits on the working case (this patient only)
-            meds = [
-                m
-                for m in edited_meds
-                if (m.get("medicine_name") or "").strip()
-            ]
             if meds:
                 case_out["medications"] = meds
-                _store_edited_meds(pid, meds)
             if working_case.get("bill"):
                 case_out["bill"] = working_case["bill"]
             if working_case.get("follow_up_appointment") not in (None, ""):
@@ -759,6 +669,7 @@ def page_corrections(
                     case_out[key] = val_e
 
             st.session_state.summary = None
+            status.write("Re-index RAG…")
             index_out = bridge.reindex_after_hitl(case_out)
             indexed_ok = bool(index_out.get("indexed"))
             sync_pipeline_after_hitl(
@@ -766,6 +677,7 @@ def page_corrections(
                 validation=validation,
                 summary=None,
                 indexed=indexed_ok,
+                trace_id=out.get("trace_id"),
             )
             status.update(label="Validation complete", state="complete")
             remaining = critical_issues(list(validation.get("findings") or []))

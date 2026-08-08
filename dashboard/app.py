@@ -278,6 +278,7 @@ def _sync_pipeline_after_hitl(
     validation: dict[str, Any] | None = None,
     summary: dict[str, Any] | None = None,
     indexed: bool | None = None,
+    trace_id: str | None = None,
 ) -> None:
     """Keep Host snapshot in sync after Corrections re-validate / summarize."""
     if case is not None:
@@ -286,6 +287,14 @@ def _sync_pipeline_after_hitl(
         st.session_state.validation = validation
     if summary is not None:
         st.session_state.summary = summary
+    if trace_id:
+        st.session_state.trace_id = trace_id
+        try:
+            from shared.tracing.langfuse import trace_url
+
+            st.session_state.langfuse_trace_url = trace_url(trace_id) or ""
+        except Exception:
+            pass
 
     pr = dict(st.session_state.pipeline_result or {})
     val = st.session_state.validation or {}
@@ -307,6 +316,8 @@ def _sync_pipeline_after_hitl(
         pr["case"] = case
     if indexed is not None:
         pr["indexed"] = indexed
+    if trace_id:
+        pr["trace_id"] = trace_id
     stages = list(pr.get("stages_run") or [])
     for stage in ("validate", "index", "gate", "summary_or_hitl"):
         if stage not in stages:

@@ -1,15 +1,20 @@
 """LangFuse observability (SSoT §9) — one Trace, Host Agent root, nested spans.
 
-Beginner picture:
+Beginner picture (Process patient / Host pipeline):
   Trace (discharge_case_id / patient_id)
   └── Host Agent
-      ├── scan_patients
-      ├── prepare_patient
+      ├── Monitor Agent → scan_patients
       ├── Extractor Agent → load_documents / extract_record / …
       ├── Normalizer Agent → normalize_clinical_record / …
       ├── Validator Agent → validate_clinical_record / …
-      ├── Sampling Events / Translation Events / Errors
-      └── Final Discharge Summary (Summary Agent)
+      ├── Final Discharge Summary (Summary Agent)
+      └── Workflow Output
+
+HITL Corrections Re-run (validate only — no re-extract):
+  Trace
+  └── Host Agent
+      ├── Validator Agent (mode=hitl_revalidate) → validate_clinical_record / …
+      └── Workflow Output
 
 Nested LangFuse observations stay open while children run (no nested traces).
 When LANGFUSE_* keys are missing, the same tree is written under
